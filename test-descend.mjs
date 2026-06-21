@@ -19,8 +19,9 @@ ws.on('message', (b) => {
     if (m.mask[y][x] !== '0') known[y][x] = m.grid[y][x];
   if (!me) return;
 
-  // success: descended once and climbed back to depth 1
-  if (reachedDepth >= 2 && depth === 1 && m.me.onStairs !== 'down') { climbedBack = true; finish(); return; }
+  // success: descended at least once and climbed back to depth 1
+  // (ascending lands you ON the upper level's down-stairs — that's correct, so don't exclude it)
+  if (reachedDepth >= 2 && depth === 1) { climbedBack = true; finish(); return; }
 
   if (depth === 1 && reachedDepth === 1) {
     if (m.me.onStairs === 'down') { ws.send(JSON.stringify({ t: 'descend' })); return; }

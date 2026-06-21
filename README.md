@@ -17,12 +17,22 @@ Open the URL in a browser (multiple tabs, or other machines on your network via
 
 | Key | Action |
 |-----|--------|
-| `WASD` / arrows | move (bump a monster to attack) |
+| `WASD` / arrows | move (bump a monster to attack; bump a fallen ally to revive) |
 | `Y U B N` | move diagonally |
+| `F` | fire ranged attack at the nearest visible foe (Mage/Ranger) |
 | `>` / `<` | descend / climb stairs (while standing on them) |
 | `Q` | quaff a healing potion |
 | `E` | eat a food ration |
+| `R` / `T` | read scroll of magic mapping / teleportation |
 | `Enter` | chat with the party |
+
+### Classes
+
+Pick a class when you join:
+
+- **Warrior** — high HP, strong melee, starts armored. The frontline tank.
+- **Mage** — fragile, but fires `magic bolt`s at range with a strong punch.
+- **Ranger** — balanced, with fast-recharging `arrow`s at long range.
 
 ### The quest (modeled on the original *Rogue*)
 
@@ -31,19 +41,26 @@ just the squares beside you. Explored ground is remembered, dimmed. Each player 
 own field of view, but you all crawl one **persistent** dungeon, so a floor you cleared
 stays cleared and the party can split across depths.
 
-- **Goal:** descend to **depth 8**, claim the **Amulet of Yendor** (`"`), and carry it
-  back up to the surface (`<` on depth 1) to win.
+- **Goal:** descend to **depth 8**, defeat the **Yendor Warden** (`W`) guarding the
+  **Amulet of Yendor** (`"`), and carry the Amulet back up to the surface (`<` on depth 1)
+  to win.
 - **Hunger:** your `Sated → Hungry → Weak → Starving` clock ticks down. Eat rations (`%`)
   with `E` or you'll starve to death.
 - **Gear:** pick up weapons (`)`) for `+ATK` and armor (`[`) for armor class, which soaks
   incoming damage. Better gear auto-equips.
+- **Ranged combat:** Mages and Rangers press `F` to strike the nearest foe in sight — a
+  bolt streaks across the map. Warriors fight up close.
+- **Scrolls** (`?`): *magic mapping* (`R`) reveals the whole floor; *teleportation* (`T`)
+  blinks you to a random spot.
 - **Loot & combat:** grab `$` gold and `!` potions; kill monsters
   (`b`at → `r`at → `k`obold → `s`nake → `o`rc → `z`ombie → `T`roll → `D`ragon, scaling with
-  depth) for XP and level up (+HP/+ATK). Slain monsters may drop gold.
+  depth) for XP and level up (+HP/+ATK). Slain monsters may drop gold. **Snakes poison** you.
 - **Traps** (`^`) hide in the floor — dart traps wound you, trap doors fling you across
   the level. They reveal once sprung.
-- **Death** isn't permanent here: you respawn at the entrance after a few seconds, losing
-  half your gold — and if you were carrying the Amulet, it drops where you fell.
+- **Co-op revive:** when you fall you become **downed** (`%`) for 18 seconds. An ally who
+  steps into you pulls you back to half health. If no one reaches you in time, you die,
+  respawn at the entrance, and lose half your gold — and if you carried the Amulet, it
+  drops where you fell.
 
 `@` is you, `&` are other heroes (only visible when in your line of sight).
 
@@ -71,8 +88,10 @@ For a quick public link from your own machine, a tunnel works too:
 - `public/index.html` — thin client: renders the fog-of-war grid, HUD (HP/XP/hunger,
   gear, depth, Amulet), party roster, legend, and log/chat; sends input. No game logic
   lives here, so clients can't cheat or see through walls.
-- `test-client.mjs` — headless smoke test (two players: fog-of-war, HUD, movement).
+- `test-client.mjs` — headless smoke test (fog-of-war, HUD, classes, ranged, movement).
 - `test-descend.mjs` — pathfinding bot that explores, descends, and climbs back.
+- `test-coop.mjs` — two bots descend to a lethal floor; verifies ranged combat and the
+  downed → revive co-op loop.
 
 Authoritative-server design means all players always agree on the world state, and
 since visibility is computed server-side, the unexplored map is never sent to a client.

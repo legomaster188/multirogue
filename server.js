@@ -119,6 +119,7 @@ function populate(level) {
   for (let i = 0; i < 3 + level.depth; i++) drop({ kind: 'gold', amt: 5 + rnd(10 + level.depth * 4) });
   for (let i = 0; i < 2 + (level.depth >> 1); i++) drop({ kind: 'potion' });
   for (let i = 0; i < 2; i++) drop({ kind: 'food' });
+  for (let i = 0; i < 1 + (level.depth >> 2); i++) drop({ kind: rnd(2) ? 'scroll_map' : 'scroll_tele' });
   if (rnd(2) === 0) drop(makeWeapon(level.depth));
   if (rnd(2) === 0) drop(makeArmor(level.depth));
 
@@ -132,6 +133,11 @@ function populate(level) {
     amuletSpawned = true;
     const p = freeTile(level);
     level.items.push({ x: p.x, y: p.y, kind: 'amulet' });
+    // the Yendor Warden guards the Amulet
+    const b = freeTileNear(level, p);
+    const hp = 140 + level.depth * 5;
+    level.monsters.push({ id: 'boss' + (monNo++), g: 'W', name: 'Yendor Warden', atk: 18, xp: 400,
+      speed: 2, sight: 12, hp, maxhp: hp, x: b.x, y: b.y, cd: 0, boss: true });
   }
 }
 
@@ -153,6 +159,7 @@ const send = (ws, obj) => { if (ws && ws.readyState === 1) ws.send(JSON.stringif
 const broadcast = (obj) => { const s = JSON.stringify(obj); for (const c of wss.clients) if (c.readyState === 1) c.send(s); };
 const sendLog = (p, text, cls) => send(p.ws, { t: 'log', text, cls });
 const broadcastLog = (text, cls) => broadcast({ t: 'log', text, cls });
+const broadcastFx = (depth, obj) => { for (const p of players.values()) if (p.depth === depth) send(p.ws, obj); };
 const COLORS = ['#4ec9ff', '#ffd24e', '#7CFC00', '#ff6ec7', '#ff8c42', '#b07cff', '#52ffb8', '#ff5d5d'];
 
 // ---------- hunger ----------
@@ -164,18 +171,32 @@ function hungerState(h) {
   return 'Sated';
 }
 
+// ---------- classes ----------
+const CLASSES = {
+  warrior: { label: 'Warrior', hp: 32, atk: 6, armor: 2, weapon: 1, ranged: false },
+  mage:    { label: 'Mage',    hp: 16, atk: 3, armor: 0, weapon: 0, ranged: true, rdmg: 9, rrange: 7, rcd: 5, ammo: 'magic bolt' },
+  ranger:  { label: 'Ranger',  hp: 22, atk: 4, armor: 1, weapon: 1, ranged: true, rdmg: 5, rrange: 9, rcd: 2, ammo: 'arrow' },
+};
+
 // ---------- player lifecycle ----------
-function makePlayer(id, ws, name) {
+function makePlayer(id, ws, name, clsKey) {
+  const cls = CLASSES[clsKey] ? clsKey : 'warrior';
+  const c = CLASSES[cls];
   const lvl = getLevel(1);
   const s = freeTileNear(lvl, lvl.up);
   return {
     id, ws, name, color: COLORS[nextId % COLORS.length],
+    cls, className: c.label,
     depth: 1, x: s.x, y: s.y, alive: true,
-    hp: 20, maxhp: 20, atk: 4, level: 1, xp: 0, next: 20,
-    gold: 0, potions: 1, rations: 1, hunger: HUNGER_MAX,
-    weaponBonus: 0, weaponName: 'bare fists', armorBonus: 0, armorName: 'no armor',
-    hasAmulet: false, won: false,
-    kills: 0, deaths: 0, moveCd: 0, respawnAt: 0,
+    baseHp: c.hp, hp: c.hp, maxhp: c.hp, atk: c.atk, level: 1, xp: 0, next: 20,
+    gold: 0, potions: 1, rations: 1, scrollMap: 1, scrollTele: 0, hunger: HUNGER_MAX,
+    weaponBonus: c.weapon, weaponName: c.weapon ? WEAPONS[c.weapon] : 'bare fists',
+    armorBonus: c.armor, armorName: c.armor ? ARMORS[c.armor] : 'no armor',
+    ranged: c.ranged, rdmg: c.rdmg || 0, rrange: c.rrange || 0, rcd: c.rcd || 0,
+    ammoName: c.ammo || '', fireCd: 0,
+    poison: 0, hasAmulet: false, won: false,
+    downed: false, downedUntil: 0,
+    kills: 0, deaths: 0, moveCd: 0,
     explored: {},   // depth -> Set of tile indices
   };
 }
@@ -191,24 +212,39 @@ function freeTileNear(level, near) {
   return freeTile(level);
 }
 
-function killPlayer(p, by) {
-  p.alive = false; p.hp = 0; p.deaths++;
-  p.respawnAt = tick + 35;
+// A fallen hero is "downed" — an ally can revive them in time; otherwise they die.
+function downPlayer(p, by) {
+  if (!p.alive) return;
+  p.alive = false; p.hp = 0; p.poison = 0;
+  p.downed = true; p.downedUntil = tick + 90;   // ~18s window
   const lvl = getLevel(p.depth);
-  const lost = Math.floor(p.gold / 2);
-  p.gold -= lost;
   if (p.hasAmulet) { // drop the Amulet where you fell so it can be recovered
     p.hasAmulet = false;
     lvl.items.push({ x: p.x, y: p.y, kind: 'amulet' });
-    broadcastLog(`${p.name} died carrying the Amulet — it lies on depth ${p.depth}!`, 'bad');
+    broadcastLog(`${p.name} fell carrying the Amulet — it lies on depth ${p.depth}!`, 'bad');
   }
-  broadcastLog(`${p.name} was slain by ${by} on depth ${p.depth}. (lost ${lost} gold)`, 'bad');
+  broadcastLog(`${p.name} has fallen to ${by} on depth ${p.depth}! An ally can revive them (move beside them) within 18s.`, 'bad');
+}
+
+function finalDeath(p) {
+  p.downed = false; p.deaths++;
+  const lost = Math.floor(p.gold / 2); p.gold -= lost;
+  respawn(p);
+  broadcastLog(`${p.name} perished and returns to the entrance. (lost ${lost} gold)`, 'bad');
+}
+
+function revive(rescuer, p) {
+  p.alive = true; p.downed = false;
+  p.hp = Math.floor(p.maxhp / 2);
+  p.hunger = Math.max(p.hunger, 300);
+  sendLog(p, `${rescuer.name} pulls you back from death!`, 'good');
+  broadcastLog(`${rescuer.name} revived ${p.name}!`, 'good');
 }
 
 function respawn(p) {
   p.alive = true;
   p.depth = 1;
-  p.maxhp = 20 + (p.level - 1) * 6;
+  p.maxhp = p.baseHp + (p.level - 1) * 6;
   p.hp = p.maxhp;
   p.hunger = Math.max(p.hunger, 400);
   const lvl = getLevel(1);
@@ -216,6 +252,8 @@ function respawn(p) {
   p.x = s.x; p.y = s.y;
   sendLog(p, 'You awaken at the dungeon entrance, restored.', 'good');
 }
+
+function downedAt(depth, x, y) { for (const p of players.values()) if (p.downed && p.depth === depth && p.x === x && p.y === y) return p; }
 
 // ---------- progression ----------
 function levelUp(p) {
@@ -227,17 +265,37 @@ function levelUp(p) {
 }
 
 // ---------- combat ----------
-function playerAttack(p, m) {
-  const dmg = p.atk + p.weaponBonus + rnd(3);
+function damageMonster(p, m, dmg, verb) {
   m.hp -= dmg;
-  sendLog(p, `You hit the ${m.name} for ${dmg}.`, 'hit');
+  sendLog(p, `${verb} the ${m.name} for ${dmg}.`, 'hit');
   if (m.hp <= 0) {
     sendLog(p, `You have defeated the ${m.name}! +${m.xp} XP`, 'good');
     p.kills++; p.xp += m.xp; levelUp(p);
     const lvl = getLevel(p.depth);
     lvl.monsters = lvl.monsters.filter(x => x !== m);  // remove immediately
-    if (rnd(2) === 0) lvl.items.push({ x: m.x, y: m.y, kind: 'gold', amt: 3 + rnd(5 + p.depth * 3) });
+    if (m.boss) broadcastLog(`${p.name} has slain the ${m.name}!`, 'good');
+    if (m.boss || rnd(2) === 0) lvl.items.push({ x: m.x, y: m.y, kind: 'gold', amt: (m.boss ? 100 : 0) + 3 + rnd(5 + p.depth * 3) });
   }
+}
+
+function playerAttack(p, m) { damageMonster(p, m, p.atk + p.weaponBonus + rnd(3), 'You hit'); }
+
+function fireBolt(p) {
+  if (!p.alive) return;
+  if (!p.ranged) { sendLog(p, 'You have no ranged weapon.', 'sys'); return; }
+  if (tick < p.fireCd) { sendLog(p, 'Your ranged attack is not ready.', 'sys'); return; }
+  const lvl = getLevel(p.depth);
+  const vis = computeVisible(lvl, p.x, p.y);
+  let target = null, best = Infinity;
+  for (const m of lvl.monsters) {
+    if (m.hp <= 0 || !vis.has(m.y * W + m.x)) continue;
+    const dd = chebyshev(p, m);
+    if (dd <= p.rrange && dd < best) { best = dd; target = m; }
+  }
+  if (!target) { sendLog(p, 'No target in sight.', 'sys'); return; }
+  p.fireCd = tick + p.rcd;
+  broadcastFx(p.depth, { t: 'fx', kind: 'bolt', color: p.color, from: { x: p.x, y: p.y }, to: { x: target.x, y: target.y } });
+  damageMonster(p, target, p.rdmg + Math.floor(p.level / 2) + rnd(3), `Your ${p.ammoName} strikes`);
 }
 
 function monsterAttack(m, p) {
@@ -245,7 +303,8 @@ function monsterAttack(m, p) {
   dmg = Math.max(1, dmg);
   p.hp -= dmg;
   sendLog(p, `The ${m.name} hits you for ${dmg}.`, 'bad');
-  if (p.hp <= 0) killPlayer(p, `a ${m.name}`);
+  if (p.hp <= 0) { downPlayer(p, `a ${m.name}`); return; }
+  if (m.g === 's' && rnd(2) === 0) { p.poison = Math.max(p.poison, 6); sendLog(p, 'The snake bite poisons you!', 'bad'); }
 }
 
 // ---------- movement & actions ----------
@@ -261,6 +320,8 @@ function tryMove(p, dir) {
   if (lvl.grid[ny][nx] === WALL) return;
   const m = monsterAt(lvl, nx, ny);
   if (m) { playerAttack(p, m); return; }
+  const fallen = downedAt(p.depth, nx, ny);
+  if (fallen) { revive(p, fallen); p.moveCd = tick + 3; return; }   // revive an ally instead of stepping in
   if (playerAt(p.depth, nx, ny)) return;     // don't stack on a teammate
   p.x = nx; p.y = ny;
   pickup(p, lvl);
@@ -274,6 +335,8 @@ function pickup(p, lvl) {
   if (it.kind === 'gold') { p.gold += it.amt; sendLog(p, `You found ${it.amt} gold.`, 'good'); }
   else if (it.kind === 'potion') { p.potions++; sendLog(p, 'You pick up a healing potion.', 'good'); }
   else if (it.kind === 'food') { p.rations++; sendLog(p, 'You pick up a food ration.', 'good'); }
+  else if (it.kind === 'scroll_map') { p.scrollMap++; sendLog(p, 'You pick up a scroll of magic mapping.', 'good'); }
+  else if (it.kind === 'scroll_tele') { p.scrollTele++; sendLog(p, 'You pick up a scroll of teleportation.', 'good'); }
   else if (it.kind === 'amulet') { p.hasAmulet = true; broadcastLog(`${p.name} has claimed the Amulet of Yendor! Return to the surface!`, 'good'); }
   else if (it.kind === 'weapon') {
     if (it.bonus > p.weaponBonus) { p.weaponBonus = it.bonus; p.weaponName = it.name; sendLog(p, `You wield the ${it.name} (+${it.bonus} ATK).`, 'good'); }
@@ -296,8 +359,25 @@ function triggerTrap(p, lvl) {
   } else {
     p.hp -= tr.dmg;
     sendLog(p, `A dart trap springs! You take ${tr.dmg} damage.`, 'bad');
-    if (p.hp <= 0) killPlayer(p, 'a trap');
+    if (p.hp <= 0) downPlayer(p, 'a trap');
   }
+}
+
+function readMap(p) {
+  if (!p.alive || p.scrollMap <= 0) { sendLog(p, 'You have no scroll of magic mapping.', 'sys'); return; }
+  p.scrollMap--;
+  const exp = p.explored[p.depth] || (p.explored[p.depth] = new Set());
+  for (let i = 0; i < W * H; i++) exp.add(i);
+  sendLog(p, 'You read a scroll of magic mapping — the level is revealed.', 'good');
+}
+
+function readTele(p) {
+  if (!p.alive || p.scrollTele <= 0) { sendLog(p, 'You have no scroll of teleportation.', 'sys'); return; }
+  p.scrollTele--;
+  const lvl = getLevel(p.depth);
+  const s = freeTile(lvl);
+  p.x = s.x; p.y = s.y;
+  sendLog(p, 'You read a scroll of teleportation and blink away.', 'good');
 }
 
 function quaff(p) {
@@ -368,7 +448,7 @@ function tickMonsters(level) {
       const d = pick(Object.values(DIRS)); nx += d[0]; ny += d[1];
     }
     nx = clamp(nx, 0, W - 1); ny = clamp(ny, 0, H - 1);
-    if (level.grid[ny][nx] !== WALL && !monsterAt(level, nx, ny) && !playerAt(level.depth, nx, ny)) { m.x = nx; m.y = ny; }
+    if (level.grid[ny][nx] !== WALL && !monsterAt(level, nx, ny) && !playerAt(level.depth, nx, ny) && !downedAt(level.depth, nx, ny)) { m.x = nx; m.y = ny; }
   }
   level.monsters = level.monsters.filter(m => m.hp > 0);
   if (level.monsters.length < 3 + level.depth && rnd(10) === 0) spawnMonster(level);
@@ -397,16 +477,19 @@ wss.on('connection', (ws) => {
     let msg; try { msg = JSON.parse(buf); } catch { return; }
     if (msg.t === 'join') {
       const name = String(msg.name || 'Hero').slice(0, 14).replace(/[^\w \-]/g, '') || 'Hero';
-      player = makePlayer(id, ws, name);
+      player = makePlayer(id, ws, name, msg.cls);
       players.set(id, player);
       send(ws, { t: 'welcome', id, w: W, h: H, amuletDepth: AMULET_DEPTH });
-      broadcastLog(`${name} enters the dungeon.`, 'good');
+      broadcastLog(`${name} the ${player.className} enters the dungeon.`, 'good');
       return;
     }
     if (!player) return;
     if (msg.t === 'move') tryMove(player, msg.dir);
+    else if (msg.t === 'fire') fireBolt(player);
     else if (msg.t === 'quaff') quaff(player);
     else if (msg.t === 'eat') eat(player);
+    else if (msg.t === 'readmap') readMap(player);
+    else if (msg.t === 'readtele') readTele(player);
     else if (msg.t === 'descend') useStairs(player, 'down');
     else if (msg.t === 'ascend') useStairs(player, 'up');
     else if (msg.t === 'chat') {
@@ -418,7 +501,7 @@ wss.on('connection', (ws) => {
 });
 
 // ---------- per-player snapshot ----------
-const ITEM_GLYPH = { gold: '$', potion: '!', food: '%', weapon: ')', armor: '[', amulet: '"' };
+const ITEM_GLYPH = { gold: '$', potion: '!', food: '%', weapon: ')', armor: '[', amulet: '"', scroll_map: '?', scroll_tele: '?' };
 
 function snapshotFor(p) {
   const lvl = getLevel(p.depth);
@@ -442,14 +525,14 @@ function snapshotFor(p) {
     grid.push(grow); mask.push(mrow);
   }
 
-  const visM = lvl.monsters.filter(m => vis.has(m.y * W + m.x)).map(m => ({ x: m.x, y: m.y, g: m.g, name: m.name }));
+  const visM = lvl.monsters.filter(m => vis.has(m.y * W + m.x)).map(m => ({ x: m.x, y: m.y, g: m.g, name: m.name, boss: !!m.boss }));
   const visI = lvl.items.filter(it => vis.has(it.y * W + it.x)).map(it => ({ x: it.x, y: it.y, g: ITEM_GLYPH[it.kind] }));
-  const others = [...players.values()].filter(o => o.depth === p.depth && o.alive && vis.has(o.y * W + o.x))
-    .map(o => ({ x: o.x, y: o.y, me: o.id === p.id, color: o.color, name: o.name }));
+  const others = [...players.values()].filter(o => o.depth === p.depth && (o.alive || o.downed) && vis.has(o.y * W + o.x))
+    .map(o => ({ x: o.x, y: o.y, me: o.id === p.id, color: o.color, name: o.name, downed: !o.alive && o.downed }));
 
   const roster = [...players.values()].sort((a, b) => b.kills - a.kills).map(o => ({
-    name: o.name, color: o.color, level: o.level, kills: o.kills, gold: o.gold,
-    depth: o.depth, alive: o.alive, amulet: o.hasAmulet, me: o.id === p.id,
+    name: o.name, color: o.color, className: o.className, level: o.level, kills: o.kills, gold: o.gold,
+    depth: o.depth, alive: o.alive, downed: o.downed, amulet: o.hasAmulet, me: o.id === p.id,
   }));
 
   return {
@@ -458,9 +541,12 @@ function snapshotFor(p) {
     me: {
       hp: Math.max(0, p.hp), maxhp: p.maxhp, atk: p.atk, weaponBonus: p.weaponBonus, weaponName: p.weaponName,
       armorBonus: p.armorBonus, armorName: p.armorName, level: p.level, xp: p.xp, next: p.next,
-      gold: p.gold, potions: p.potions, rations: p.rations, hunger: p.hunger, hungerMax: HUNGER_MAX,
-      hungerState: hungerState(p.hunger), depth: p.depth, kills: p.kills, deaths: p.deaths,
-      alive: p.alive, hasAmulet: p.hasAmulet,
+      gold: p.gold, potions: p.potions, rations: p.rations, scrollMap: p.scrollMap, scrollTele: p.scrollTele,
+      hunger: p.hunger, hungerMax: HUNGER_MAX, hungerState: hungerState(p.hunger),
+      depth: p.depth, kills: p.kills, deaths: p.deaths, className: p.className,
+      alive: p.alive, hasAmulet: p.hasAmulet, poisoned: p.poison > 0,
+      ranged: p.ranged, fireReady: p.ranged && tick >= p.fireCd,
+      downed: p.downed, downedLeft: p.downed ? Math.max(0, Math.ceil((p.downedUntil - tick) * TICK_MS / 1000)) : 0,
       onStairs: p.alive ? (lvl.grid[p.y][p.x] === DOWN ? 'down' : lvl.grid[p.y][p.x] === UP ? 'up' : null) : null,
     },
   };
@@ -474,16 +560,21 @@ setInterval(() => {
   const activeDepths = new Set([...players.values()].filter(p => p.alive).map(p => p.depth));
   for (const d of activeDepths) tickMonsters(getLevel(d));
 
-  // hunger + respawn
+  // status effects, hunger, and downed-timer
   for (const p of players.values()) {
     if (p.alive) {
+      if (p.poison > 0 && tick % 3 === 0) {
+        p.hp -= 2; p.poison--;
+        if (p.hp <= 0) { downPlayer(p, 'poison'); continue; }
+        sendLog(p, 'The poison courses through you.', 'bad');
+      }
       p.hunger = Math.max(0, p.hunger - 1);
       if (p.hunger <= 0 && tick % 5 === 0) {
         p.hp -= 1;
-        if (p.hp <= 0) killPlayer(p, 'starvation');
+        if (p.hp <= 0) downPlayer(p, 'starvation');
         else sendLog(p, 'You are starving!', 'bad');
       }
-    } else if (tick >= p.respawnAt) respawn(p);
+    } else if (p.downed && tick >= p.downedUntil) finalDeath(p);
   }
 
   for (const p of players.values()) send(p.ws, snapshotFor(p));

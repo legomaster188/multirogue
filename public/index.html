@@ -41,6 +41,11 @@
   .legend { font-size:12px; line-height:1.8; }
   #dead { color:#ff5d5d; font-weight:bold; display:none; }
   #amulet { color:var(--gold); font-weight:bold; display:none; }
+  #status { font-size:13px; margin-top:4px; }
+  .cls { font-family:inherit; cursor:pointer; background:#05070c; color:var(--ink);
+    border:1px solid #2c3447; border-radius:6px; padding:8px 14px; font-size:14px; line-height:1.4; }
+  .cls small { color:var(--dim); font-size:11px; }
+  .cls.sel { border-color:var(--gold); color:var(--gold); box-shadow:0 0 0 1px var(--gold) inset; }
   #banner { position:fixed; top:0; left:0; right:0; text-align:center; padding:14px;
     background:linear-gradient(90deg,#1a1206,#3a2a08,#1a1206); color:var(--gold); font-size:20px;
     font-weight:bold; display:none; z-index:20; border-bottom:1px solid var(--gold); }
@@ -51,10 +56,19 @@
   <h1>☠ MULTI<span style="color:var(--gold)">ROGUE</span> ☠</h1>
   <p>A shared, persistent ASCII dungeon. Move with <kbd>WASD</kbd>/arrows (and <kbd>Y U B N</kbd> for
      diagonals). Bump monsters to attack. The dungeon is dark — rooms light up as you enter them.
-     Descend with <kbd>&gt;</kbd> and climb with <kbd>&lt;</kbd> while on a staircase. Watch your
-     <b>hunger</b> — eat rations with <kbd>E</kbd> or starve. Quaff potions with <kbd>Q</kbd>.
-     Find the <b>Amulet of Yendor</b> deep below and carry it back to the surface to win.</p>
+     Descend with <kbd>&gt;</kbd>, climb with <kbd>&lt;</kbd>. Mages/Rangers <kbd>F</kbd>ire at foes.
+     Eat rations <kbd>E</kbd>, quaff potions <kbd>Q</kbd>, read scrolls (<kbd>R</kbd> map, <kbd>T</kbd> teleport).
+     Revive a fallen ally by stepping into them. Carry the <b>Amulet of Yendor</b> from depth 8 back to the
+     surface to win.</p>
   <input id="nameIn" maxlength="14" placeholder="your hero's name" />
+  <div>
+    <div style="color:var(--dim);font-size:13px;margin-bottom:6px;">choose your class</div>
+    <div id="classPick" style="display:flex;gap:10px;justify-content:center;">
+      <button class="cls" data-cls="warrior">⚔ Warrior<br><small>tanky melee</small></button>
+      <button class="cls" data-cls="mage">✦ Mage<br><small>ranged, fragile</small></button>
+      <button class="cls" data-cls="ranger">➶ Ranger<br><small>fast, ranged</small></button>
+    </div>
+  </div>
   <button id="playBtn">ENTER THE DUNGEON</button>
 </div>
 
@@ -68,15 +82,16 @@
       <span style="color:#fff">@</span> you &nbsp; <span style="color:#4ec9ff">&amp;</span> ally &nbsp;
       <span style="color:var(--gold)">$</span> gold &nbsp; <span style="color:#7CFC00">!</span> potion &nbsp;
       <span style="color:#caa15a">%</span> food &nbsp; <span style="color:#9fd0ff">)</span> weapon &nbsp;
-      <span style="color:#9fd0ff">[</span> armor &nbsp; <span style="color:#ff8c42">^</span> trap &nbsp;
-      <span style="color:#fff">&gt;&lt;</span> stairs &nbsp; <span style="color:var(--gold)">"</span> Amulet &nbsp;
-      <span style="color:#ff5d5d">b r k s o z T D</span> monsters
+      <span style="color:#9fd0ff">[</span> armor &nbsp; <span style="color:#caa15a">?</span> scroll &nbsp;
+      <span style="color:#ff8c42">^</span> trap &nbsp; <span style="color:#fff">&gt;&lt;</span> stairs &nbsp;
+      <span style="color:var(--gold)">"</span> Amulet &nbsp; <span style="color:#7a2a2a">%</span> fallen ally &nbsp;
+      <span style="color:#ff5d5d">b r k s o z T D</span> monsters &nbsp; <span style="color:#b07cff">W</span> boss
     </div>
   </div>
   <div id="right">
     <div class="panel" id="hud">
-      <h2>You — Depth <span id="depth">1</span></h2>
-      <div id="dead">YOU ARE DEAD — respawning at the entrance…</div>
+      <h2><span id="cls">Hero</span> — Depth <span id="depth">1</span></h2>
+      <div id="dead">☠ YOU HAVE FALLEN — an ally can revive you (<span id="downedLeft">0</span>s)…</div>
       <div id="amulet">✦ You carry the Amulet of Yendor — climb to the surface! ✦</div>
       <div>HP <span id="hpTxt"></span></div>
       <div class="bar"><i id="hpBar"></i></div>
@@ -90,10 +105,12 @@
         <span>🪙 <b id="gold">0</b></span>
         <span>⚗ <b id="pot">0</b></span>
         <span>🍖 <b id="rat">0</b></span>
+        <span>📜 <b id="scr">0</b></span>
       </div>
       <div class="row sys" style="font-size:12px;">
         <span id="weap"></span><span id="armr"></span>
       </div>
+      <div id="status"></div>
       <div id="stairHint" class="sys" style="font-size:12px;margin-top:4px;"></div>
     </div>
     <div class="panel" style="flex:0 0 auto;">
@@ -110,22 +127,44 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let ws, myId = null, W = 0, H = 0;
+let ws, myId = null, W = 0, H = 0, lastState = null, chosenClass = 'warrior';
 
 function connect(name) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}`);
-  ws.onopen = () => ws.send(JSON.stringify({ t: 'join', name }));
+  ws.onopen = () => ws.send(JSON.stringify({ t: 'join', name, cls: chosenClass }));
   ws.onmessage = (e) => handle(JSON.parse(e.data));
   ws.onclose = () => addLog('Disconnected from server.', 'bad');
 }
 
+let fxList = [];   // transient ranged-bolt effects: {cells:[{x,y}], col, until}
 function handle(m) {
   if (m.t === 'welcome') { myId = m.id; W = m.w; H = m.h; }
   else if (m.t === 'state') render(m);
   else if (m.t === 'log') addLog(m.text, m.cls);
   else if (m.t === 'chat') addLog(`${m.name}: ${m.text}`, 'chat', m.color);
+  else if (m.t === 'fx' && m.kind === 'bolt') {
+    fxList.push({ cells: line(m.from, m.to), col: m.color, until: Date.now() + 180 });
+    if (lastState) { render(lastState); setTimeout(() => lastState && render(lastState), 190); }
+  }
   else if (m.t === 'win') showBanner(`🏆 VICTORY! You escaped with the Amulet. Score ${m.score}.`);
+}
+
+// Bresenham line for drawing the bolt path
+function line(a, b) {
+  const cells = [];
+  let x0 = a.x, y0 = a.y; const x1 = b.x, y1 = b.y;
+  const dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  let err = dx - dy;
+  for (let g = 0; g < 200; g++) {
+    if (!(x0 === a.x && y0 === a.y)) cells.push({ x: x0, y: y0 });
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; x0 += sx; }
+    if (e2 < dx) { err += dx; y0 += sy; }
+  }
+  return cells;
 }
 
 function showBanner(text) {
@@ -144,10 +183,11 @@ function addLog(text, cls, color) {
 }
 
 const TERRAIN_COLOR = { '#':'#3b4456', '.':'#2a3344', '>':'#ffffff', '<':'#ffffff', '^':'#ff8c42', ' ':'#000' };
-const MON_COLOR = { b:'#9aa', r:'#b98', k:'#caa15a', s:'#6ab04c', o:'#6ab04c', z:'#8a8', T:'#3aa0c0', D:'#ff5d5d' };
+const MON_COLOR = { b:'#9aa', r:'#b98', k:'#caa15a', s:'#6ab04c', o:'#6ab04c', z:'#8a8', T:'#3aa0c0', D:'#ff5d5d', W:'#b07cff' };
 const ITEM_COLOR = { '$':'#ffd24e', '!':'#7CFC00', '%':'#caa15a', ')':'#9fd0ff', '[':'#9fd0ff', '"':'#ff6ec7' };
 
 function render(s) {
+  lastState = s;
   $('depth').textContent = s.depth;
   // base buffer: terrain by visibility (2=lit, 1=remembered dim, 0=unseen)
   const buf = [];
@@ -165,9 +205,15 @@ function render(s) {
   // entities (server only sends those in view)
   for (const it of s.items) buf[it.y][it.x] = { c: it.g, col: ITEM_COLOR[it.g] || '#fff' };
   for (const mo of s.monsters) buf[mo.y][mo.x] = { c: mo.g, col: MON_COLOR[mo.g] || '#ff5d5d' };
-  for (const o of s.others) buf[o.y][o.x] = o.me
-    ? { c: '@', col: '#ffffff' }
-    : { c: '&', col: o.color };
+  for (const o of s.others) {
+    if (o.downed) buf[o.y][o.x] = { c: '%', col: '#7a2a2a' };
+    else buf[o.y][o.x] = o.me ? { c: '@', col: '#ffffff' } : { c: '&', col: o.color };
+  }
+  // transient ranged-bolt effects
+  const now = Date.now();
+  fxList = fxList.filter(f => f.until > now);
+  for (const f of fxList) for (const c of f.cells)
+    if (buf[c.y] && buf[c.y][c.x] && s.mask[c.y][c.x] === '2') buf[c.y][c.x] = { c: '*', col: f.col };
 
   // group consecutive same-color chars into spans
   let html = '', cur = null, run = '';
@@ -185,7 +231,9 @@ function render(s) {
 
   // HUD
   const me = s.me;
-  $('dead').style.display = me.alive ? 'none' : 'block';
+  $('cls').textContent = me.className;
+  $('dead').style.display = (!me.alive && me.downed) ? 'block' : 'none';
+  $('downedLeft').textContent = me.downedLeft;
   $('amulet').style.display = me.hasAmulet ? 'block' : 'none';
   $('hpTxt').textContent = `${me.hp} / ${me.maxhp}`;
   $('hpBar').style.width = pct(me.hp, me.maxhp);
@@ -199,8 +247,15 @@ function render(s) {
   $('gold').textContent = me.gold;
   $('pot').textContent = me.potions;
   $('rat').textContent = me.rations;
+  $('scr').textContent = me.scrollMap + me.scrollTele;
   $('weap').textContent = `⚔ ${me.weaponName}${me.weaponBonus?` (+${me.weaponBonus})`:''}`;
   $('armr').textContent = `🛡 ${me.armorName}${me.armorBonus?` (+${me.armorBonus})`:''}`;
+  const st = [];
+  if (me.poisoned) st.push('<span style="color:#7CFC00">☣ Poisoned</span>');
+  if (me.ranged) st.push(me.fireReady ? '<span style="color:#9fd0ff">➶ Fire ready (F)</span>' : '<span class="sys">➶ Fire charging…</span>');
+  if (me.scrollMap) st.push(`<span class="sys">📜 map ×${me.scrollMap} (R)</span>`);
+  if (me.scrollTele) st.push(`<span class="sys">📜 tele ×${me.scrollTele} (T)</span>`);
+  $('status').innerHTML = st.join(' &nbsp; ');
   $('stairHint').textContent = me.onStairs === 'down' ? 'Down-stairs here — press > to descend.'
     : me.onStairs === 'up' ? (me.depth === 1 ? 'The dungeon exit — press < to leave (need the Amulet).' : 'Up-stairs here — press < to climb.')
     : '';
@@ -209,8 +264,9 @@ function render(s) {
   const ros = $('roster'); ros.innerHTML = '';
   for (const p of s.roster) {
     const d = document.createElement('div');
-    d.innerHTML = `<span style="color:${p.color}">${p.me?'@':'&'} ${esc(p.name)}${p.alive?'':' ☠'}${p.amulet?' "':''}</span>`
-      + `<span class="sys">D${p.depth} · Lv${p.level} · ${p.kills}⚔ · ${p.gold}🪙</span>`;
+    const mark = p.downed ? ' ✚' : p.alive ? '' : ' ☠';
+    d.innerHTML = `<span style="color:${p.color}">${p.me?'@':'&'} ${esc(p.name)}${mark}${p.amulet?' "':''}</span>`
+      + `<span class="sys">${p.className?.slice(0,3)||''} D${p.depth} · Lv${p.level} · ${p.kills}⚔</span>`;
     ros.appendChild(d);
   }
 }
@@ -237,6 +293,9 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { $('cmd').focus(); e.preventDefault(); return; }
   if (e.key === 'q' || e.key === 'Q') { sendMsg({ t:'quaff' }); return; }
   if (e.key === 'e' || e.key === 'E') { sendMsg({ t:'eat' }); return; }
+  if (e.key === 'f' || e.key === 'F') { sendMsg({ t:'fire' }); return; }
+  if (e.key === 'r' || e.key === 'R') { sendMsg({ t:'readmap' }); return; }
+  if (e.key === 't' || e.key === 'T') { sendMsg({ t:'readtele' }); return; }
   if (e.key === '>') { sendMsg({ t:'descend' }); return; }
   if (e.key === '<') { sendMsg({ t:'ascend' }); return; }
   const dir = KEYMAP[e.key];
@@ -256,6 +315,12 @@ function start() {
   $('overlay').style.display = 'none';
   connect(name);
 }
+// class picker
+document.querySelectorAll('.cls').forEach(btn => btn.addEventListener('click', () => {
+  chosenClass = btn.dataset.cls;
+  document.querySelectorAll('.cls').forEach(b => b.classList.toggle('sel', b === btn));
+}));
+document.querySelector('.cls[data-cls="warrior"]').classList.add('sel');
 $('playBtn').onclick = start;
 $('nameIn').addEventListener('keydown', e => { if (e.key === 'Enter') start(); });
 $('nameIn').focus();
