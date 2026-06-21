@@ -1,0 +1,12 @@
+# One-click deploy to Render (https://render.com) for online play.
+# Create a new "Blueprint" from your repo and Render reads this file.
+services:
+  - type: web
+    name: multirogue
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 22

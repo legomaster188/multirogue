@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+.env
+
+# pre-existing machine content, not part of this project
+.claude/
+horsegamemod/

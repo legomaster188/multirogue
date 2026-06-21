@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MultiRogue — multiplayer dungeon crawler</title>
+<style>
+  :root { --bg:#0b0e14; --panel:#11151f; --ink:#c8d0e0; --dim:#5a6276; --gold:#ffd24e; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font-family: "Cascadia Code", "Consolas", ui-monospace, monospace; }
+  #wrap { display: flex; gap: 12px; padding: 12px; height: 100%; }
+  #left { flex: 0 0 auto; }
+  #right { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; min-width: 240px; }
+  #map { line-height: 1.0; font-size: 16px; white-space: pre; letter-spacing: 1px;
+    background: #05070c; padding: 10px; border: 1px solid #1c2230; border-radius: 8px; }
+  .panel { background: var(--panel); border: 1px solid #1c2230; border-radius: 8px; padding: 10px; }
+  h2 { margin: 0 0 6px; font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; }
+  #log { flex: 1 1 auto; overflow-y: auto; font-size: 13px; min-height: 120px; }
+  #log div { padding: 1px 0; }
+  .good { color: #7CFC00; } .bad { color: #ff5d5d; } .hit { color: var(--gold); }
+  .chat { color: #9fd0ff; } .sys { color: var(--dim); }
+  #roster div { display:flex; justify-content:space-between; font-size:13px; padding:2px 0; }
+  #hud { font-size: 14px; }
+  .bar { height: 10px; background:#2a0d0d; border-radius:5px; overflow:hidden; margin:4px 0 8px; }
+  .bar > i { display:block; height:100%; background:linear-gradient(90deg,#ff5d5d,#ff9a3d); }
+  .xp > i { background:linear-gradient(90deg,#4ec9ff,#7CFC00); }
+  #cmd { width:100%; background:#05070c; color:var(--ink); border:1px solid #1c2230;
+    border-radius:6px; padding:6px; font-family:inherit; font-size:13px; }
+  #overlay { position:fixed; inset:0; background:rgba(5,7,12,.92); display:flex;
+    align-items:center; justify-content:center; flex-direction:column; gap:14px; z-index:10; }
+  #overlay h1 { font-size:34px; margin:0; letter-spacing:3px; }
+  #overlay p { color:var(--dim); max-width:440px; text-align:center; line-height:1.5; }
+  #overlay input { font-size:18px; padding:8px 12px; background:#05070c; color:var(--ink);
+    border:1px solid #2c3447; border-radius:6px; font-family:inherit; text-align:center; }
+  #overlay button { font-size:16px; padding:8px 28px; background:var(--gold); color:#000;
+    border:0; border-radius:6px; cursor:pointer; font-family:inherit; font-weight:bold; }
+  kbd { background:#1c2230; border-radius:4px; padding:1px 6px; font-size:12px; }
+  #dead { color:#ff5d5d; font-weight:bold; display:none; }
+</style>
+</head>
+<body>
+<div id="overlay">
+  <h1>☠ MULTI<span style="color:var(--gold)">ROGUE</span> ☠</h1>
+  <p>A shared ASCII dungeon. Move with <kbd>WASD</kbd> / arrows (diagonals too),
+     bump monsters to attack, <kbd>Q</kbd> to quaff a potion, <kbd>Enter</kbd> to chat.
+     Grab <span style="color:var(--gold)">$</span> gold and <span style="color:#7CFC00">!</span> potions,
+     reach the <span style="color:#fff">&gt;</span> stairs to take the whole party deeper.</p>
+  <input id="nameIn" maxlength="14" placeholder="your hero's name" />
+  <button id="playBtn">ENTER THE DUNGEON</button>
+</div>
+
+<div id="wrap">
+  <div id="left">
+    <div id="map" class="panel"></div>
+  </div>
+  <div id="right">
+    <div class="panel" id="hud">
+      <h2>You — Depth <span id="depth">1</span></h2>
+      <div id="dead">YOU ARE DEAD — respawning…</div>
+      <div>HP <span id="hpTxt"></span></div>
+      <div class="bar"><i id="hpBar"></i></div>
+      <div>XP — Lv <span id="lvl">1</span></div>
+      <div class="bar xp"><i id="xpBar"></i></div>
+      <div>⚔ ATK <span id="atk">4</span> &nbsp; 🪙 <span id="gold">0</span> &nbsp; ⚗ <span id="pot">0</span></div>
+    </div>
+    <div class="panel" style="flex:0 0 auto;">
+      <h2>Party</h2>
+      <div id="roster"></div>
+    </div>
+    <div class="panel" style="display:flex;flex-direction:column;flex:1 1 auto;min-height:0;">
+      <h2>Log &amp; Chat</h2>
+      <div id="log"></div>
+      <input id="cmd" placeholder="press Enter to chat…" maxlength="120" />
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let ws, myId = null, W = 0, H = 0, lastState = null;
+
+function connect(name) {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}`);
+  ws.onopen = () => ws.send(JSON.stringify({ t: 'join', name }));
+  ws.onmessage = (e) => handle(JSON.parse(e.data));
+  ws.onclose = () => addLog('Disconnected from server.', 'bad');
+}
+
+function handle(m) {
+  if (m.t === 'welcome') { myId = m.id; W = m.w; H = m.h; }
+  else if (m.t === 'state') { lastState = m; render(m); }
+  else if (m.t === 'log') addLog(m.text, m.cls);
+  else if (m.t === 'chat') addLog(`${m.name}: ${m.text}`, 'chat', m.color);
+}
+
+function addLog(text, cls, color) {
+  const log = $('log');
+  const d = document.createElement('div');
+  d.className = cls || 'sys';
+  if (color) d.style.color = color;
+  d.textContent = text;
+  log.appendChild(d);
+  while (log.children.length > 200) log.removeChild(log.firstChild);
+  log.scrollTop = log.scrollHeight;
+}
+
+const GLYPH_COLOR = { '#':'#39414f', '.':'#222a38', '>':'#ffffff',
+  'r':'#a98','k':'#caa15a','o':'#6ab04c','T':'#3aa0c0','D':'#ff5d5d',
+  '$':'#ffd24e','!':'#7CFC00' };
+
+function render(s) {
+  $('depth').textContent = s.depth;
+  // build a 2D char+color buffer from the map
+  const buf = s.grid.map(row => row.split('').map(ch => ({ c: ch, col: GLYPH_COLOR[ch] || '#444' })));
+  for (const it of s.items) { const ch = it.kind === 'gold' ? '$' : '!'; buf[it.y][it.x] = { c: ch, col: GLYPH_COLOR[ch] }; }
+  for (const mo of s.monsters) buf[mo.y][mo.x] = { c: mo.g, col: GLYPH_COLOR[mo.g] || '#ff5d5d' };
+  for (const p of s.players) {
+    if (!p.alive) { buf[p.y] && (buf[p.y][p.x] = { c: '%', col: '#7a2a2a' }); continue; }
+    buf[p.y][p.x] = { c: p.id === myId ? '@' : '&', col: p.color, me: p.id === myId };
+  }
+  // render to HTML spans (group by color for speed)
+  let html = '', curCol = null, run = '';
+  const flush = () => { if (run) { html += `<span style="color:${curCol}">${esc(run)}</span>`; run=''; } };
+  for (let y = 0; y < buf.length; y++) {
+    for (let x = 0; x < buf[y].length; x++) {
+      const cell = buf[y][x];
+      const col = cell.me ? '#ffffff' : cell.col;
+      const c = cell.me ? '@' : cell.c;
+      if (col !== curCol) { flush(); curCol = col; }
+      run += c;
+    }
+    run += '\n';
+  }
+  flush();
+  $('map').innerHTML = html;
+
+  // HUD for me
+  const me = s.players.find(p => p.id === myId);
+  if (me) {
+    $('dead').style.display = me.alive ? 'none' : 'block';
+    $('hpTxt').textContent = `${Math.max(0, me.hp)} / ${me.maxhp}`;
+    $('hpBar').style.width = clamp01(me.hp / me.maxhp) + '%';
+    $('lvl').textContent = me.level;
+    $('xpBar').style.width = clamp01(me.xp / me.next) + '%';
+    $('atk').textContent = me.atk; $('gold').textContent = me.gold; $('pot').textContent = me.potions;
+  }
+  // roster sorted by kills
+  const ros = $('roster');
+  ros.innerHTML = '';
+  [...s.players].sort((a,b) => b.kills - a.kills).forEach(p => {
+    const d = document.createElement('div');
+    d.innerHTML = `<span style="color:${p.color}">${p.id===myId?'@':'&'} ${esc(p.name)}${p.alive?'':' ☠'}</span>`
+      + `<span class="sys">Lv${p.level} · ${p.kills}⚔ · ${p.gold}🪙</span>`;
+    ros.appendChild(d);
+  });
+}
+
+const esc = (s) => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const clamp01 = (v) => Math.max(0, Math.min(100, v * 100));
+
+// ---------- input ----------
+const KEYMAP = {
+  ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', ArrowRight:'right',
+  w:'up', s:'down', a:'left', d:'right',
+  y:'upleft', u:'upright', b:'downleft', n:'downright',
+};
+let held = null, moveTimer = null;
+function sendMove(dir) { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'move', dir })); }
+
+document.addEventListener('keydown', (e) => {
+  if (document.activeElement === $('cmd')) {
+    if (e.key === 'Enter') {
+      const t = $('cmd').value.trim();
+      if (t) ws.send(JSON.stringify({ t:'chat', text:t }));
+      $('cmd').value = ''; $('cmd').blur();
+    } else if (e.key === 'Escape') { $('cmd').value=''; $('cmd').blur(); }
+    return;
+  }
+  if (e.key === 'Enter') { $('cmd').focus(); e.preventDefault(); return; }
+  if (e.key === 'q' || e.key === 'Q') { ws.send(JSON.stringify({ t:'quaff' })); return; }
+  const dir = KEYMAP[e.key];
+  if (dir) {
+    e.preventDefault();
+    sendMove(dir);
+    if (held !== dir) { held = dir; clearInterval(moveTimer); moveTimer = setInterval(() => sendMove(held), 130); }
+  }
+});
+document.addEventListener('keyup', (e) => {
+  if (KEYMAP[e.key] === held) { held = null; clearInterval(moveTimer); moveTimer = null; }
+});
+
+// ---------- start ----------
+function start() {
+  const name = $('nameIn').value.trim() || 'Hero';
+  $('overlay').style.display = 'none';
+  connect(name);
+}
+$('playBtn').onclick = start;
+$('nameIn').addEventListener('keydown', e => { if (e.key === 'Enter') start(); });
+$('nameIn').focus();
+</script>
+</body>
+</html>
