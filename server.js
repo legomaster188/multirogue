@@ -1,5 +1,7 @@
 // MultiRogue — authoritative multiplayer roguelike server.
-// One shared dungeon. Players move in real time; monsters act on a tick.
+// Modeled on the original Rogue: persistent multi-level dungeon, lit-room
+// field-of-view, a hunger clock, weapons/armor with armor class, traps,
+// stairs up/down, and the Amulet of Yendor as the win condition.
 import { createServer } from 'http';
 import { readFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
@@ -23,30 +25,29 @@ const http = createServer(async (req, res) => {
   }
 });
 
-// ---------- RNG / helpers ----------
+// ---------- helpers ----------
 const rnd = (n) => Math.floor(Math.random() * n);
 const pick = (a) => a[rnd(a.length)];
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-const dist = (a, b) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+const chebyshev = (a, b) => Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
 
-// ---------- Map tiles ----------
+// ---------- map tiles ----------
 const W = 60, H = 34;
-const WALL = '#', FLOOR = '.', STAIRS = '>';
+const WALL = '#', FLOOR = '.', DOWN = '>', UP = '<';
+const AMULET_DEPTH = 8;          // Amulet of Yendor lives this deep
+let amuletSpawned = false;       // there is only ever one
 
-// ---------- Dungeon generation: rooms + corridors ----------
-function genDungeon(depth) {
+// ---------- dungeon generation: rooms + corridors ----------
+function genLevel(depth) {
   const grid = Array.from({ length: H }, () => Array(W).fill(WALL));
   const rooms = [];
-  const tries = 60;
-  for (let i = 0; i < tries && rooms.length < 12; i++) {
+  for (let i = 0; i < 80 && rooms.length < 12; i++) {
     const rw = 4 + rnd(8), rh = 3 + rnd(5);
     const rx = 1 + rnd(W - rw - 1), ry = 1 + rnd(H - rh - 1);
-    const room = { x: rx, y: ry, w: rw, h: rh, cx: rx + (rw >> 1), cy: ry + (rh >> 1) };
     if (rooms.some(o => rx < o.x + o.w + 1 && rx + rw + 1 > o.x && ry < o.y + o.h + 1 && ry + rh + 1 > o.y)) continue;
     for (let y = ry; y < ry + rh; y++) for (let x = rx; x < rx + rw; x++) grid[y][x] = FLOOR;
-    rooms.push(room);
+    rooms.push({ x: rx, y: ry, w: rw, h: rh, cx: rx + (rw >> 1), cy: ry + (rh >> 1) });
   }
-  // connect each room to the previous with an L-shaped corridor
   const carveH = (x1, x2, y) => { for (let x = Math.min(x1, x2); x <= Math.max(x1, x2); x++) grid[y][x] = FLOOR; };
   const carveV = (y1, y2, x) => { for (let y = Math.min(y1, y2); y <= Math.max(y1, y2); y++) grid[y][x] = FLOOR; };
   for (let i = 1; i < rooms.length; i++) {
@@ -54,255 +55,438 @@ function genDungeon(depth) {
     if (rnd(2)) { carveH(a.cx, b.cx, a.cy); carveV(a.cy, b.cy, b.cx); }
     else { carveV(a.cy, b.cy, a.cx); carveH(a.cx, b.cx, b.cy); }
   }
-  // stairs in the last room
-  const last = rooms[rooms.length - 1] || { cx: W >> 1, cy: H >> 1 };
-  grid[last.cy][last.cx] = STAIRS;
-  const spawn = rooms[0] || last;
-  return { grid, rooms, spawn: { x: spawn.cx, y: spawn.cy }, stairs: { x: last.cx, y: last.cy } };
+  const first = rooms[0] || { cx: W >> 1, cy: H >> 1 };
+  const last = rooms[rooms.length - 1] || first;
+  // up-stairs at entrance, down-stairs at the far room (depth 1's up-stairs is the exit)
+  grid[first.cy][first.cx] = UP;
+  if (depth < AMULET_DEPTH + 12) grid[last.cy][last.cx] = DOWN; // a floor below the amulet still exists
+
+  const level = {
+    depth, grid, rooms,
+    up: { x: first.cx, y: first.cy },
+    down: { x: last.cx, y: last.cy },
+    monsters: [], items: [], traps: [],
+  };
+  populate(level);
+  return level;
 }
 
-// ---------- Monster archetypes; scale with depth ----------
-const MONSTERS = [
-  { g: 'r', name: 'rat',     hp: 4,  atk: 1, xp: 2,  speed: 2, sight: 5 },
-  { g: 'k', name: 'kobold',  hp: 7,  atk: 3, xp: 5,  speed: 2, sight: 7 },
-  { g: 'o', name: 'orc',     hp: 14, atk: 5, xp: 12, speed: 3, sight: 7 },
-  { g: 'T', name: 'troll',   hp: 26, atk: 9, xp: 30, speed: 4, sight: 8 },
-  { g: 'D', name: 'dragon',  hp: 60, atk: 16, xp: 90, speed: 3, sight: 10 },
-];
-
-// ---------- Game state ----------
-const game = {
-  depth: 1,
-  ...genDungeon(1),
-  players: new Map(), // id -> player
-  monsters: [],
-  items: [],         // {x,y,kind} kind: 'gold'|'potion'
-  tick: 0,
-};
-
-function emptyFloor() {
-  for (let t = 0; t < 500; t++) {
+function freeTile(level, avoidPlayers = true) {
+  for (let t = 0; t < 600; t++) {
     const x = 1 + rnd(W - 2), y = 1 + rnd(H - 2);
-    if (game.grid[y][x] === FLOOR && !monsterAt(x, y) && !playerAt(x, y)) return { x, y };
+    if (level.grid[y][x] !== FLOOR) continue;
+    if (monsterAt(level, x, y)) continue;
+    if (avoidPlayers && playerAt(level.depth, x, y)) continue;
+    return { x, y };
   }
-  return { ...game.spawn };
+  return { ...level.up };
 }
 
-function populateLevel() {
-  game.monsters = [];
-  game.items = [];
-  const maxKind = Math.min(MONSTERS.length - 1, Math.floor(game.depth / 1.5));
-  const count = 5 + game.depth * 2;
-  for (let i = 0; i < count; i++) {
-    const tpl = MONSTERS[rnd(maxKind + 1)];
-    const p = emptyFloor();
-    game.monsters.push({ id: 'm' + game.tick + '_' + i, ...tpl, hp: tpl.hp + game.depth, maxhp: tpl.hp + game.depth, x: p.x, y: p.y, cd: 0 });
-  }
-  for (let i = 0; i < 4 + game.depth; i++) {
-    const p = emptyFloor();
-    game.items.push({ x: p.x, y: p.y, kind: rnd(3) === 0 ? 'potion' : 'gold', amt: 5 + rnd(15) });
-  }
-}
-populateLevel();
+// ---------- monsters (Rogue-style letters), gated + scaled by depth ----------
+const MONSTERS = [
+  { g: 'b', name: 'bat',     hp: 4,  atk: 1,  xp: 2,  speed: 2, sight: 6,  minD: 1 },
+  { g: 'r', name: 'rat',     hp: 6,  atk: 2,  xp: 3,  speed: 2, sight: 5,  minD: 1 },
+  { g: 'k', name: 'kobold',  hp: 9,  atk: 3,  xp: 6,  speed: 2, sight: 7,  minD: 2 },
+  { g: 's', name: 'snake',   hp: 12, atk: 4,  xp: 9,  speed: 3, sight: 6,  minD: 3 },
+  { g: 'o', name: 'orc',     hp: 16, atk: 6,  xp: 14, speed: 3, sight: 7,  minD: 4 },
+  { g: 'z', name: 'zombie',  hp: 24, atk: 7,  xp: 20, speed: 4, sight: 6,  minD: 5 },
+  { g: 'T', name: 'troll',   hp: 32, atk: 10, xp: 35, speed: 4, sight: 8,  minD: 6 },
+  { g: 'D', name: 'dragon',  hp: 60, atk: 16, xp: 90, speed: 3, sight: 10, minD: 8 },
+];
+let monNo = 0;
 
-function monsterAt(x, y) { return game.monsters.find(m => m.x === x && m.y === y && m.hp > 0); }
-function playerAt(x, y) { for (const p of game.players.values()) if (p.alive && p.x === x && p.y === y) return p; }
-
-function descend() {
-  game.depth++;
-  Object.assign(game, genDungeon(game.depth));
-  populateLevel();
-  for (const p of game.players.values()) { p.x = game.spawn.x; p.y = game.spawn.y; }
-  broadcastLog(`The party descends to depth ${game.depth}!`, 'good');
+function spawnMonster(level) {
+  const eligible = MONSTERS.filter(m => m.minD <= level.depth);
+  const tpl = pick(eligible.length ? eligible : [MONSTERS[0]]);
+  const p = freeTile(level);
+  const hp = tpl.hp + level.depth * 2;
+  level.monsters.push({ id: 'm' + (monNo++), g: tpl.g, name: tpl.name, atk: tpl.atk + Math.floor(level.depth / 2),
+    xp: tpl.xp, speed: tpl.speed, sight: tpl.sight, hp, maxhp: hp, x: p.x, y: p.y, cd: rnd(tpl.speed) });
 }
 
-// ---------- Combat ----------
-function playerLevelUp(p) {
-  while (p.xp >= p.next) {
-    p.xp -= p.next;
-    p.level++;
-    p.next = Math.floor(p.next * 1.5);
-    p.maxhp += 6; p.hp = p.maxhp; p.atk += 2;
-    sendLog(p, `You reach level ${p.level}! (+HP, +ATK)`, 'good');
+// ---------- items ----------
+const WEAPONS = ['', 'dagger', 'short sword', 'mace', 'long sword', 'battle axe', 'war hammer', 'rune blade'];
+const ARMORS  = ['', 'leather armor', 'studded leather', 'ring mail', 'chain mail', 'banded mail', 'plate mail'];
+
+function makeWeapon(depth) { const b = clamp(1 + rnd(2) + Math.floor(depth / 2), 1, WEAPONS.length - 1); return { kind: 'weapon', bonus: b, name: WEAPONS[b] }; }
+function makeArmor(depth)  { const b = clamp(1 + rnd(2) + Math.floor(depth / 2), 1, ARMORS.length - 1);  return { kind: 'armor',  bonus: b, name: ARMORS[b] }; }
+
+function populate(level) {
+  const monCount = 5 + level.depth * 2;
+  for (let i = 0; i < monCount; i++) spawnMonster(level);
+
+  const drop = (it) => { const p = freeTile(level); level.items.push({ x: p.x, y: p.y, ...it }); };
+  for (let i = 0; i < 3 + level.depth; i++) drop({ kind: 'gold', amt: 5 + rnd(10 + level.depth * 4) });
+  for (let i = 0; i < 2 + (level.depth >> 1); i++) drop({ kind: 'potion' });
+  for (let i = 0; i < 2; i++) drop({ kind: 'food' });
+  if (rnd(2) === 0) drop(makeWeapon(level.depth));
+  if (rnd(2) === 0) drop(makeArmor(level.depth));
+
+  for (let i = 0; i < level.depth; i++) {
+    const p = freeTile(level);
+    if (level.grid[p.y][p.x] !== FLOOR) continue;
+    level.traps.push({ x: p.x, y: p.y, kind: rnd(3) === 0 ? 'teleport' : 'dart', known: false, dmg: 3 + rnd(level.depth * 2) });
+  }
+
+  if (level.depth === AMULET_DEPTH && !amuletSpawned) {
+    amuletSpawned = true;
+    const p = freeTile(level);
+    level.items.push({ x: p.x, y: p.y, kind: 'amulet' });
   }
 }
 
-function attackMonster(p, m) {
-  const dmg = p.atk + rnd(3);
-  m.hp -= dmg;
-  sendLog(p, `You hit the ${m.name} for ${dmg}.`, 'hit');
-  if (m.hp <= 0) {
-    sendLog(p, `You slay the ${m.name}! +${m.xp} XP`, 'good');
-    p.kills++; p.xp += m.xp; playerLevelUp(p);
-  }
+// ---------- world state ----------
+const levels = new Map();        // depth -> level
+const players = new Map();        // id -> player
+let tick = 0;
+function getLevel(depth) { if (!levels.has(depth)) levels.set(depth, genLevel(depth)); return levels.get(depth); }
+getLevel(1);
+
+function monsterAt(level, x, y) { return level.monsters.find(m => m.x === x && m.y === y && m.hp > 0); }
+function playerAt(depth, x, y) { for (const p of players.values()) if (p.alive && p.depth === depth && p.x === x && p.y === y) return p; }
+function trapAt(level, x, y) { return level.traps.find(t => t.x === x && t.y === y); }
+
+// ---------- networking primitives ----------
+const wss = new WebSocketServer({ server: http });
+let nextId = 1;
+const send = (ws, obj) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); };
+const broadcast = (obj) => { const s = JSON.stringify(obj); for (const c of wss.clients) if (c.readyState === 1) c.send(s); };
+const sendLog = (p, text, cls) => send(p.ws, { t: 'log', text, cls });
+const broadcastLog = (text, cls) => broadcast({ t: 'log', text, cls });
+const COLORS = ['#4ec9ff', '#ffd24e', '#7CFC00', '#ff6ec7', '#ff8c42', '#b07cff', '#52ffb8', '#ff5d5d'];
+
+// ---------- hunger ----------
+const HUNGER_MAX = 1300;
+function hungerState(h) {
+  if (h <= 0) return 'Starving';
+  if (h < 150) return 'Weak';
+  if (h < 350) return 'Hungry';
+  return 'Sated';
 }
 
-function monsterAttack(m, p) {
-  const dmg = Math.max(1, m.atk + rnd(2) - rnd(2));
-  p.hp -= dmg;
-  sendLog(p, `The ${m.name} hits you for ${dmg}.`, 'bad');
-  if (p.hp <= 0) killPlayer(p, m.name);
+// ---------- player lifecycle ----------
+function makePlayer(id, ws, name) {
+  const lvl = getLevel(1);
+  const s = freeTileNear(lvl, lvl.up);
+  return {
+    id, ws, name, color: COLORS[nextId % COLORS.length],
+    depth: 1, x: s.x, y: s.y, alive: true,
+    hp: 20, maxhp: 20, atk: 4, level: 1, xp: 0, next: 20,
+    gold: 0, potions: 1, rations: 1, hunger: HUNGER_MAX,
+    weaponBonus: 0, weaponName: 'bare fists', armorBonus: 0, armorName: 'no armor',
+    hasAmulet: false, won: false,
+    kills: 0, deaths: 0, moveCd: 0, respawnAt: 0,
+    explored: {},   // depth -> Set of tile indices
+  };
+}
+
+function freeTileNear(level, near) {
+  for (let r = 0; r < 8; r++) {
+    for (let t = 0; t < 12; t++) {
+      const x = clamp(near.x + rnd(r * 2 + 1) - r, 1, W - 2);
+      const y = clamp(near.y + rnd(r * 2 + 1) - r, 1, H - 2);
+      if (level.grid[y][x] === FLOOR && !monsterAt(level, x, y) && !playerAt(level.depth, x, y)) return { x, y };
+    }
+  }
+  return freeTile(level);
 }
 
 function killPlayer(p, by) {
   p.alive = false; p.hp = 0; p.deaths++;
-  p.respawnAt = game.tick + 30; // ~6s at 200ms tick
-  broadcastLog(`${p.name} was killed by a ${by}.`, 'bad');
+  p.respawnAt = tick + 35;
+  const lvl = getLevel(p.depth);
+  const lost = Math.floor(p.gold / 2);
+  p.gold -= lost;
+  if (p.hasAmulet) { // drop the Amulet where you fell so it can be recovered
+    p.hasAmulet = false;
+    lvl.items.push({ x: p.x, y: p.y, kind: 'amulet' });
+    broadcastLog(`${p.name} died carrying the Amulet — it lies on depth ${p.depth}!`, 'bad');
+  }
+  broadcastLog(`${p.name} was slain by ${by} on depth ${p.depth}. (lost ${lost} gold)`, 'bad');
 }
 
 function respawn(p) {
   p.alive = true;
+  p.depth = 1;
   p.maxhp = 20 + (p.level - 1) * 6;
   p.hp = p.maxhp;
-  const s = emptyFloor();
+  p.hunger = Math.max(p.hunger, 400);
+  const lvl = getLevel(1);
+  const s = freeTileNear(lvl, lvl.up);
   p.x = s.x; p.y = s.y;
-  sendLog(p, 'You awaken, restored.', 'good');
+  sendLog(p, 'You awaken at the dungeon entrance, restored.', 'good');
 }
 
-// ---------- Player movement (real-time, rate-limited per player) ----------
+// ---------- progression ----------
+function levelUp(p) {
+  while (p.xp >= p.next) {
+    p.xp -= p.next; p.level++; p.next = Math.floor(p.next * 1.6);
+    p.maxhp += 6; p.hp = p.maxhp; p.atk += 2;
+    sendLog(p, `Welcome to level ${p.level}! (+6 HP, +2 ATK)`, 'good');
+  }
+}
+
+// ---------- combat ----------
+function playerAttack(p, m) {
+  const dmg = p.atk + p.weaponBonus + rnd(3);
+  m.hp -= dmg;
+  sendLog(p, `You hit the ${m.name} for ${dmg}.`, 'hit');
+  if (m.hp <= 0) {
+    sendLog(p, `You have defeated the ${m.name}! +${m.xp} XP`, 'good');
+    p.kills++; p.xp += m.xp; levelUp(p);
+    const lvl = getLevel(p.depth);
+    lvl.monsters = lvl.monsters.filter(x => x !== m);  // remove immediately
+    if (rnd(2) === 0) lvl.items.push({ x: m.x, y: m.y, kind: 'gold', amt: 3 + rnd(5 + p.depth * 3) });
+  }
+}
+
+function monsterAttack(m, p) {
+  let dmg = m.atk + rnd(3) - p.armorBonus;      // armor class soaks damage
+  dmg = Math.max(1, dmg);
+  p.hp -= dmg;
+  sendLog(p, `The ${m.name} hits you for ${dmg}.`, 'bad');
+  if (p.hp <= 0) killPlayer(p, `a ${m.name}`);
+}
+
+// ---------- movement & actions ----------
 const DIRS = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0],
   upleft: [-1, -1], upright: [1, -1], downleft: [-1, 1], downright: [1, 1] };
 
 function tryMove(p, dir) {
-  if (!p.alive) return;
-  const now = game.tick;
-  if (now < p.moveCd) return;
-  p.moveCd = now + 1; // limit to one move per tick
+  if (!p.alive || tick < p.moveCd) return;
   const d = DIRS[dir]; if (!d) return;
+  p.moveCd = tick + 1;
+  const lvl = getLevel(p.depth);
   const nx = clamp(p.x + d[0], 0, W - 1), ny = clamp(p.y + d[1], 0, H - 1);
-  if (game.grid[ny][nx] === WALL) return;
-  const m = monsterAt(nx, ny);
-  if (m) { attackMonster(p, m); return; }
-  if (playerAt(nx, ny)) return; // can't stack on a teammate
+  if (lvl.grid[ny][nx] === WALL) return;
+  const m = monsterAt(lvl, nx, ny);
+  if (m) { playerAttack(p, m); return; }
+  if (playerAt(p.depth, nx, ny)) return;     // don't stack on a teammate
   p.x = nx; p.y = ny;
-  // pickups
-  const ix = game.items.findIndex(it => it.x === nx && it.y === ny);
-  if (ix >= 0) {
-    const it = game.items[ix];
-    if (it.kind === 'gold') { p.gold += it.amt; sendLog(p, `Picked up ${it.amt} gold.`, 'good'); }
-    else { p.potions++; sendLog(p, 'Picked up a potion.', 'good'); }
-    game.items.splice(ix, 1);
+  pickup(p, lvl);
+  triggerTrap(p, lvl);
+}
+
+function pickup(p, lvl) {
+  const ix = lvl.items.findIndex(it => it.x === p.x && it.y === p.y);
+  if (ix < 0) return;
+  const it = lvl.items[ix];
+  if (it.kind === 'gold') { p.gold += it.amt; sendLog(p, `You found ${it.amt} gold.`, 'good'); }
+  else if (it.kind === 'potion') { p.potions++; sendLog(p, 'You pick up a healing potion.', 'good'); }
+  else if (it.kind === 'food') { p.rations++; sendLog(p, 'You pick up a food ration.', 'good'); }
+  else if (it.kind === 'amulet') { p.hasAmulet = true; broadcastLog(`${p.name} has claimed the Amulet of Yendor! Return to the surface!`, 'good'); }
+  else if (it.kind === 'weapon') {
+    if (it.bonus > p.weaponBonus) { p.weaponBonus = it.bonus; p.weaponName = it.name; sendLog(p, `You wield the ${it.name} (+${it.bonus} ATK).`, 'good'); }
+    else { sendLog(p, `You leave the ${it.name}; your ${p.weaponName} is better.`, 'sys'); return; }
+  } else if (it.kind === 'armor') {
+    if (it.bonus > p.armorBonus) { p.armorBonus = it.bonus; p.armorName = it.name; sendLog(p, `You don the ${it.name} (+${it.bonus} AC).`, 'good'); }
+    else { sendLog(p, `You leave the ${it.name}; your ${p.armorName} is better.`, 'sys'); return; }
   }
-  // stairs — any player can lead the descent
-  if (game.grid[ny][nx] === STAIRS) descend();
+  lvl.items.splice(ix, 1);
+}
+
+function triggerTrap(p, lvl) {
+  const tr = trapAt(lvl, p.x, p.y);
+  if (!tr) return;
+  tr.known = true;
+  if (tr.kind === 'teleport') {
+    const s = freeTile(lvl);
+    p.x = s.x; p.y = s.y;
+    sendLog(p, 'A trap door! You are teleported across the level.', 'bad');
+  } else {
+    p.hp -= tr.dmg;
+    sendLog(p, `A dart trap springs! You take ${tr.dmg} damage.`, 'bad');
+    if (p.hp <= 0) killPlayer(p, 'a trap');
+  }
 }
 
 function quaff(p) {
   if (!p.alive || p.potions <= 0) return;
   p.potions--;
-  p.hp = clamp(p.hp + 15, 0, p.maxhp);
-  sendLog(p, 'You quaff a potion. (+15 HP)', 'good');
+  const heal = 15 + p.level * 2;
+  p.hp = clamp(p.hp + heal, 0, p.maxhp);
+  sendLog(p, `You quaff a potion of healing. (+${heal} HP)`, 'good');
 }
 
-// ---------- Monster AI tick ----------
-function tickMonsters() {
-  for (const m of game.monsters) {
+function eat(p) {
+  if (!p.alive || p.rations <= 0) return;
+  if (p.hunger > HUNGER_MAX - 200) { sendLog(p, 'You are too full to eat.', 'sys'); return; }
+  p.rations--;
+  p.hunger = clamp(p.hunger + 700, 0, HUNGER_MAX);
+  sendLog(p, 'You eat a food ration.', 'good');
+}
+
+function useStairs(p, want) {
+  if (!p.alive) return;
+  const lvl = getLevel(p.depth);
+  const here = lvl.grid[p.y][p.x];
+  if (want === 'down') {
+    if (here !== DOWN) { sendLog(p, 'There are no down-stairs here.', 'sys'); return; }
+    const nd = getLevel(p.depth + 1);
+    p.depth += 1; p.x = nd.up.x; p.y = nd.up.y;
+    sendLog(p, `You descend to depth ${p.depth}.`, 'good');
+  } else { // up
+    if (here !== UP) { sendLog(p, 'There are no up-stairs here.', 'sys'); return; }
+    if (p.depth === 1) {
+      if (p.hasAmulet) winGame(p);
+      else sendLog(p, 'The dungeon exit is sealed. Only the Amulet of Yendor can open it.', 'bad');
+      return;
+    }
+    const nd = getLevel(p.depth - 1);
+    p.depth -= 1; p.x = nd.down.x; p.y = nd.down.y;
+    sendLog(p, `You climb to depth ${p.depth}.`, 'good');
+  }
+}
+
+function winGame(p) {
+  p.won = true;
+  const score = p.gold + p.level * 100 + p.kills * 25 + 1000;
+  broadcastLog(`🏆 ${p.name} escaped the dungeon with the Amulet of Yendor! VICTORY! (score ${score})`, 'good');
+  send(p.ws, { t: 'win', score });
+  // recycle the amulet so the quest can continue
+  amuletSpawned = false;
+  p.hasAmulet = false;
+}
+
+// ---------- monster AI (only on floors that have players) ----------
+function tickMonsters(level) {
+  for (const m of level.monsters) {
     if (m.hp <= 0) continue;
-    m.cd++;
-    if (m.cd < m.speed) continue;
+    if (++m.cd < m.speed) continue;
     m.cd = 0;
-    // find nearest living player in sight
     let target = null, best = Infinity;
-    for (const p of game.players.values()) {
-      if (!p.alive) continue;
-      const dd = dist(m, p);
+    for (const p of players.values()) {
+      if (!p.alive || p.depth !== level.depth) continue;
+      const dd = chebyshev(m, p);
       if (dd < best && dd <= m.sight) { best = dd; target = p; }
     }
     let nx = m.x, ny = m.y;
     if (target) {
       if (best === 1) { monsterAttack(m, target); continue; }
-      nx += Math.sign(target.x - m.x);
-      ny += Math.sign(target.y - m.y);
+      nx += Math.sign(target.x - m.x); ny += Math.sign(target.y - m.y);
     } else {
       const d = pick(Object.values(DIRS)); nx += d[0]; ny += d[1];
     }
     nx = clamp(nx, 0, W - 1); ny = clamp(ny, 0, H - 1);
-    if (game.grid[ny][nx] !== WALL && !monsterAt(nx, ny) && !playerAt(nx, ny)) { m.x = nx; m.y = ny; }
+    if (level.grid[ny][nx] !== WALL && !monsterAt(level, nx, ny) && !playerAt(level.depth, nx, ny)) { m.x = nx; m.y = ny; }
   }
-  game.monsters = game.monsters.filter(m => m.hp > 0);
-  // keep the level lively
-  if (game.monsters.length < 3 + game.depth && rnd(8) === 0) {
-    const tpl = MONSTERS[rnd(Math.min(MONSTERS.length, Math.floor(game.depth / 1.5) + 1))];
-    const p = emptyFloor();
-    game.monsters.push({ id: 'm' + game.tick, ...tpl, hp: tpl.hp + game.depth, maxhp: tpl.hp + game.depth, x: p.x, y: p.y, cd: 0 });
-  }
+  level.monsters = level.monsters.filter(m => m.hp > 0);
+  if (level.monsters.length < 3 + level.depth && rnd(10) === 0) spawnMonster(level);
 }
 
-// ---------- Networking ----------
-const wss = new WebSocketServer({ server: http });
-let nextId = 1;
+// ---------- field of view: Rogue-style lit rooms + a small radius in corridors ----------
+function computeVisible(level, px, py) {
+  const vis = new Set();
+  const room = level.rooms.find(r => px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h);
+  if (room) {
+    for (let y = room.y - 1; y <= room.y + room.h; y++)
+      for (let x = room.x - 1; x <= room.x + room.w; x++)
+        if (x >= 0 && y >= 0 && x < W && y < H) vis.add(y * W + x);
+  }
+  for (let y = py - 1; y <= py + 1; y++)
+    for (let x = px - 1; x <= px + 1; x++)
+      if (x >= 0 && y >= 0 && x < W && y < H) vis.add(y * W + x);
+  return vis;
+}
 
-function send(ws, obj) { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); }
-function broadcast(obj) { const s = JSON.stringify(obj); for (const c of wss.clients) if (c.readyState === 1) c.send(s); }
-function sendLog(p, text, cls) { if (p.ws) send(p.ws, { t: 'log', text, cls }); }
-function broadcastLog(text, cls) { broadcast({ t: 'log', text, cls }); }
-
-const COLORS = ['#4ec9ff', '#ffd24e', '#7CFC00', '#ff6ec7', '#ff8c42', '#b07cff', '#52ffb8'];
-
+// ---------- connection handling ----------
 wss.on('connection', (ws) => {
   const id = 'p' + (nextId++);
   let player = null;
-
   ws.on('message', (buf) => {
     let msg; try { msg = JSON.parse(buf); } catch { return; }
-
     if (msg.t === 'join') {
       const name = String(msg.name || 'Hero').slice(0, 14).replace(/[^\w \-]/g, '') || 'Hero';
-      const s = game.spawn;
-      player = {
-        id, ws, name, alive: true,
-        x: s.x, y: s.y, color: COLORS[(nextId) % COLORS.length],
-        hp: 20, maxhp: 20, atk: 4, level: 1, xp: 0, next: 20,
-        gold: 0, potions: 1, kills: 0, deaths: 0, moveCd: 0, respawnAt: 0,
-      };
-      // spawn on a free tile near the entrance
-      const free = emptyFloor(); player.x = free.x; player.y = free.y;
-      game.players.set(id, player);
-      send(ws, { t: 'welcome', id, w: W, h: H });
-      broadcastLog(`${player.name} entered the dungeon.`, 'good');
+      player = makePlayer(id, ws, name);
+      players.set(id, player);
+      send(ws, { t: 'welcome', id, w: W, h: H, amuletDepth: AMULET_DEPTH });
+      broadcastLog(`${name} enters the dungeon.`, 'good');
       return;
     }
     if (!player) return;
-
     if (msg.t === 'move') tryMove(player, msg.dir);
     else if (msg.t === 'quaff') quaff(player);
+    else if (msg.t === 'eat') eat(player);
+    else if (msg.t === 'descend') useStairs(player, 'down');
+    else if (msg.t === 'ascend') useStairs(player, 'up');
     else if (msg.t === 'chat') {
       const text = String(msg.text || '').slice(0, 120);
       if (text) broadcast({ t: 'chat', name: player.name, color: player.color, text });
     }
   });
-
-  ws.on('close', () => {
-    if (player) {
-      game.players.delete(id);
-      broadcastLog(`${player.name} left the dungeon.`, 'bad');
-    }
-  });
+  ws.on('close', () => { if (player) { players.delete(id); broadcastLog(`${player.name} left the dungeon.`, 'bad'); } });
 });
 
-// ---------- Main loop: tick monsters + broadcast snapshot ----------
+// ---------- per-player snapshot ----------
+const ITEM_GLYPH = { gold: '$', potion: '!', food: '%', weapon: ')', armor: '[', amulet: '"' };
+
+function snapshotFor(p) {
+  const lvl = getLevel(p.depth);
+  const vis = computeVisible(lvl, p.x, p.y);
+  let exp = p.explored[p.depth];
+  if (!exp) { exp = new Set(); p.explored[p.depth] = exp; }
+  for (const i of vis) exp.add(i);
+
+  // grid rows with known traps overlaid, plus a visibility mask (0 unseen,1 explored,2 visible)
+  const grid = [], mask = [];
+  for (let y = 0; y < H; y++) {
+    let grow = '', mrow = '';
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      let ch = lvl.grid[y][x];
+      const tr = trapAt(lvl, x, y);
+      if (tr && tr.known) ch = '^';
+      grow += ch;
+      mrow += vis.has(i) ? '2' : exp.has(i) ? '1' : '0';
+    }
+    grid.push(grow); mask.push(mrow);
+  }
+
+  const visM = lvl.monsters.filter(m => vis.has(m.y * W + m.x)).map(m => ({ x: m.x, y: m.y, g: m.g, name: m.name }));
+  const visI = lvl.items.filter(it => vis.has(it.y * W + it.x)).map(it => ({ x: it.x, y: it.y, g: ITEM_GLYPH[it.kind] }));
+  const others = [...players.values()].filter(o => o.depth === p.depth && o.alive && vis.has(o.y * W + o.x))
+    .map(o => ({ x: o.x, y: o.y, me: o.id === p.id, color: o.color, name: o.name }));
+
+  const roster = [...players.values()].sort((a, b) => b.kills - a.kills).map(o => ({
+    name: o.name, color: o.color, level: o.level, kills: o.kills, gold: o.gold,
+    depth: o.depth, alive: o.alive, amulet: o.hasAmulet, me: o.id === p.id,
+  }));
+
+  return {
+    t: 'state', depth: p.depth, w: W, h: H, grid, mask,
+    monsters: visM, items: visI, others, roster,
+    me: {
+      hp: Math.max(0, p.hp), maxhp: p.maxhp, atk: p.atk, weaponBonus: p.weaponBonus, weaponName: p.weaponName,
+      armorBonus: p.armorBonus, armorName: p.armorName, level: p.level, xp: p.xp, next: p.next,
+      gold: p.gold, potions: p.potions, rations: p.rations, hunger: p.hunger, hungerMax: HUNGER_MAX,
+      hungerState: hungerState(p.hunger), depth: p.depth, kills: p.kills, deaths: p.deaths,
+      alive: p.alive, hasAmulet: p.hasAmulet,
+      onStairs: p.alive ? (lvl.grid[p.y][p.x] === DOWN ? 'down' : lvl.grid[p.y][p.x] === UP ? 'up' : null) : null,
+    },
+  };
+}
+
+// ---------- main loop ----------
 const TICK_MS = 200;
 setInterval(() => {
-  game.tick++;
-  tickMonsters();
-  // respawn timers
-  for (const p of game.players.values()) {
-    if (!p.alive && game.tick >= p.respawnAt) respawn(p);
+  tick++;
+  // monster AI on populated floors only
+  const activeDepths = new Set([...players.values()].filter(p => p.alive).map(p => p.depth));
+  for (const d of activeDepths) tickMonsters(getLevel(d));
+
+  // hunger + respawn
+  for (const p of players.values()) {
+    if (p.alive) {
+      p.hunger = Math.max(0, p.hunger - 1);
+      if (p.hunger <= 0 && tick % 5 === 0) {
+        p.hp -= 1;
+        if (p.hp <= 0) killPlayer(p, 'starvation');
+        else sendLog(p, 'You are starving!', 'bad');
+      }
+    } else if (tick >= p.respawnAt) respawn(p);
   }
-  // snapshot — send the whole shared state (small enough for this scale)
-  const snap = {
-    t: 'state',
-    depth: game.depth,
-    grid: game.grid.map(r => r.join('')),
-    monsters: game.monsters.map(m => ({ x: m.x, y: m.y, g: m.g, hp: m.hp, maxhp: m.maxhp, name: m.name })),
-    items: game.items.map(it => ({ x: it.x, y: it.y, kind: it.kind })),
-    players: [...game.players.values()].map(p => ({
-      id: p.id, name: p.name, x: p.x, y: p.y, color: p.color, alive: p.alive,
-      hp: p.hp, maxhp: p.maxhp, level: p.level, gold: p.gold, potions: p.potions,
-      kills: p.kills, deaths: p.deaths, xp: p.xp, next: p.next, atk: p.atk,
-    })),
-  };
-  broadcast(snap);
+
+  for (const p of players.values()) send(p.ws, snapshotFor(p));
 }, TICK_MS);
 
 http.listen(PORT, () => console.log(`MultiRogue running at http://localhost:${PORT}`));

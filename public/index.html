@@ -11,58 +11,90 @@
     font-family: "Cascadia Code", "Consolas", ui-monospace, monospace; }
   #wrap { display: flex; gap: 12px; padding: 12px; height: 100%; }
   #left { flex: 0 0 auto; }
-  #right { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; min-width: 240px; }
+  #right { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; min-width: 250px; }
   #map { line-height: 1.0; font-size: 16px; white-space: pre; letter-spacing: 1px;
     background: #05070c; padding: 10px; border: 1px solid #1c2230; border-radius: 8px; }
   .panel { background: var(--panel); border: 1px solid #1c2230; border-radius: 8px; padding: 10px; }
-  h2 { margin: 0 0 6px; font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; }
-  #log { flex: 1 1 auto; overflow-y: auto; font-size: 13px; min-height: 120px; }
+  h2 { margin: 0 0 6px; font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; }
+  #log { flex: 1 1 auto; overflow-y: auto; font-size: 13px; min-height: 110px; }
   #log div { padding: 1px 0; }
   .good { color: #7CFC00; } .bad { color: #ff5d5d; } .hit { color: var(--gold); }
   .chat { color: #9fd0ff; } .sys { color: var(--dim); }
-  #roster div { display:flex; justify-content:space-between; font-size:13px; padding:2px 0; }
+  #roster div { display:flex; justify-content:space-between; gap:8px; font-size:13px; padding:2px 0; }
   #hud { font-size: 14px; }
-  .bar { height: 10px; background:#2a0d0d; border-radius:5px; overflow:hidden; margin:4px 0 8px; }
-  .bar > i { display:block; height:100%; background:linear-gradient(90deg,#ff5d5d,#ff9a3d); }
+  #hud .row { display:flex; flex-wrap:wrap; gap:4px 14px; margin-top:4px; }
+  .bar { height: 9px; background:#2a0d0d; border-radius:5px; overflow:hidden; margin:3px 0 6px; }
+  .bar > i { display:block; height:100%; background:linear-gradient(90deg,#ff5d5d,#ff9a3d); transition:width .12s; }
   .xp > i { background:linear-gradient(90deg,#4ec9ff,#7CFC00); }
+  .food > i { background:linear-gradient(90deg,#a06a2c,#ffd24e); }
   #cmd { width:100%; background:#05070c; color:var(--ink); border:1px solid #1c2230;
     border-radius:6px; padding:6px; font-family:inherit; font-size:13px; }
-  #overlay { position:fixed; inset:0; background:rgba(5,7,12,.92); display:flex;
-    align-items:center; justify-content:center; flex-direction:column; gap:14px; z-index:10; }
+  #overlay { position:fixed; inset:0; background:rgba(5,7,12,.94); display:flex;
+    align-items:center; justify-content:center; flex-direction:column; gap:14px; z-index:10; text-align:center; }
   #overlay h1 { font-size:34px; margin:0; letter-spacing:3px; }
-  #overlay p { color:var(--dim); max-width:440px; text-align:center; line-height:1.5; }
+  #overlay p { color:var(--dim); max-width:520px; line-height:1.6; }
   #overlay input { font-size:18px; padding:8px 12px; background:#05070c; color:var(--ink);
     border:1px solid #2c3447; border-radius:6px; font-family:inherit; text-align:center; }
   #overlay button { font-size:16px; padding:8px 28px; background:var(--gold); color:#000;
     border:0; border-radius:6px; cursor:pointer; font-family:inherit; font-weight:bold; }
   kbd { background:#1c2230; border-radius:4px; padding:1px 6px; font-size:12px; }
+  .legend { font-size:12px; line-height:1.8; }
   #dead { color:#ff5d5d; font-weight:bold; display:none; }
+  #amulet { color:var(--gold); font-weight:bold; display:none; }
+  #banner { position:fixed; top:0; left:0; right:0; text-align:center; padding:14px;
+    background:linear-gradient(90deg,#1a1206,#3a2a08,#1a1206); color:var(--gold); font-size:20px;
+    font-weight:bold; display:none; z-index:20; border-bottom:1px solid var(--gold); }
 </style>
 </head>
 <body>
 <div id="overlay">
   <h1>☠ MULTI<span style="color:var(--gold)">ROGUE</span> ☠</h1>
-  <p>A shared ASCII dungeon. Move with <kbd>WASD</kbd> / arrows (diagonals too),
-     bump monsters to attack, <kbd>Q</kbd> to quaff a potion, <kbd>Enter</kbd> to chat.
-     Grab <span style="color:var(--gold)">$</span> gold and <span style="color:#7CFC00">!</span> potions,
-     reach the <span style="color:#fff">&gt;</span> stairs to take the whole party deeper.</p>
+  <p>A shared, persistent ASCII dungeon. Move with <kbd>WASD</kbd>/arrows (and <kbd>Y U B N</kbd> for
+     diagonals). Bump monsters to attack. The dungeon is dark — rooms light up as you enter them.
+     Descend with <kbd>&gt;</kbd> and climb with <kbd>&lt;</kbd> while on a staircase. Watch your
+     <b>hunger</b> — eat rations with <kbd>E</kbd> or starve. Quaff potions with <kbd>Q</kbd>.
+     Find the <b>Amulet of Yendor</b> deep below and carry it back to the surface to win.</p>
   <input id="nameIn" maxlength="14" placeholder="your hero's name" />
   <button id="playBtn">ENTER THE DUNGEON</button>
 </div>
 
+<div id="banner"></div>
+
 <div id="wrap">
   <div id="left">
     <div id="map" class="panel"></div>
+    <div class="panel legend" style="margin-top:10px;">
+      <h2>Legend</h2>
+      <span style="color:#fff">@</span> you &nbsp; <span style="color:#4ec9ff">&amp;</span> ally &nbsp;
+      <span style="color:var(--gold)">$</span> gold &nbsp; <span style="color:#7CFC00">!</span> potion &nbsp;
+      <span style="color:#caa15a">%</span> food &nbsp; <span style="color:#9fd0ff">)</span> weapon &nbsp;
+      <span style="color:#9fd0ff">[</span> armor &nbsp; <span style="color:#ff8c42">^</span> trap &nbsp;
+      <span style="color:#fff">&gt;&lt;</span> stairs &nbsp; <span style="color:var(--gold)">"</span> Amulet &nbsp;
+      <span style="color:#ff5d5d">b r k s o z T D</span> monsters
+    </div>
   </div>
   <div id="right">
     <div class="panel" id="hud">
       <h2>You — Depth <span id="depth">1</span></h2>
-      <div id="dead">YOU ARE DEAD — respawning…</div>
+      <div id="dead">YOU ARE DEAD — respawning at the entrance…</div>
+      <div id="amulet">✦ You carry the Amulet of Yendor — climb to the surface! ✦</div>
       <div>HP <span id="hpTxt"></span></div>
       <div class="bar"><i id="hpBar"></i></div>
       <div>XP — Lv <span id="lvl">1</span></div>
       <div class="bar xp"><i id="xpBar"></i></div>
-      <div>⚔ ATK <span id="atk">4</span> &nbsp; 🪙 <span id="gold">0</span> &nbsp; ⚗ <span id="pot">0</span></div>
+      <div>Hunger — <span id="hungerTxt"></span></div>
+      <div class="bar food"><i id="foodBar"></i></div>
+      <div class="row">
+        <span>⚔ ATK <b id="atk">4</b></span>
+        <span>🛡 AC <b id="ac">0</b></span>
+        <span>🪙 <b id="gold">0</b></span>
+        <span>⚗ <b id="pot">0</b></span>
+        <span>🍖 <b id="rat">0</b></span>
+      </div>
+      <div class="row sys" style="font-size:12px;">
+        <span id="weap"></span><span id="armr"></span>
+      </div>
+      <div id="stairHint" class="sys" style="font-size:12px;margin-top:4px;"></div>
     </div>
     <div class="panel" style="flex:0 0 auto;">
       <h2>Party</h2>
@@ -78,7 +110,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let ws, myId = null, W = 0, H = 0, lastState = null;
+let ws, myId = null, W = 0, H = 0;
 
 function connect(name) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -90,14 +122,19 @@ function connect(name) {
 
 function handle(m) {
   if (m.t === 'welcome') { myId = m.id; W = m.w; H = m.h; }
-  else if (m.t === 'state') { lastState = m; render(m); }
+  else if (m.t === 'state') render(m);
   else if (m.t === 'log') addLog(m.text, m.cls);
   else if (m.t === 'chat') addLog(`${m.name}: ${m.text}`, 'chat', m.color);
+  else if (m.t === 'win') showBanner(`🏆 VICTORY! You escaped with the Amulet. Score ${m.score}.`);
+}
+
+function showBanner(text) {
+  const b = $('banner'); b.textContent = text; b.style.display = 'block';
+  setTimeout(() => b.style.display = 'none', 8000);
 }
 
 function addLog(text, cls, color) {
-  const log = $('log');
-  const d = document.createElement('div');
+  const log = $('log'), d = document.createElement('div');
   d.className = cls || 'sys';
   if (color) d.style.color = color;
   d.textContent = text;
@@ -106,59 +143,80 @@ function addLog(text, cls, color) {
   log.scrollTop = log.scrollHeight;
 }
 
-const GLYPH_COLOR = { '#':'#39414f', '.':'#222a38', '>':'#ffffff',
-  'r':'#a98','k':'#caa15a','o':'#6ab04c','T':'#3aa0c0','D':'#ff5d5d',
-  '$':'#ffd24e','!':'#7CFC00' };
+const TERRAIN_COLOR = { '#':'#3b4456', '.':'#2a3344', '>':'#ffffff', '<':'#ffffff', '^':'#ff8c42', ' ':'#000' };
+const MON_COLOR = { b:'#9aa', r:'#b98', k:'#caa15a', s:'#6ab04c', o:'#6ab04c', z:'#8a8', T:'#3aa0c0', D:'#ff5d5d' };
+const ITEM_COLOR = { '$':'#ffd24e', '!':'#7CFC00', '%':'#caa15a', ')':'#9fd0ff', '[':'#9fd0ff', '"':'#ff6ec7' };
 
 function render(s) {
   $('depth').textContent = s.depth;
-  // build a 2D char+color buffer from the map
-  const buf = s.grid.map(row => row.split('').map(ch => ({ c: ch, col: GLYPH_COLOR[ch] || '#444' })));
-  for (const it of s.items) { const ch = it.kind === 'gold' ? '$' : '!'; buf[it.y][it.x] = { c: ch, col: GLYPH_COLOR[ch] }; }
-  for (const mo of s.monsters) buf[mo.y][mo.x] = { c: mo.g, col: GLYPH_COLOR[mo.g] || '#ff5d5d' };
-  for (const p of s.players) {
-    if (!p.alive) { buf[p.y] && (buf[p.y][p.x] = { c: '%', col: '#7a2a2a' }); continue; }
-    buf[p.y][p.x] = { c: p.id === myId ? '@' : '&', col: p.color, me: p.id === myId };
+  // base buffer: terrain by visibility (2=lit, 1=remembered dim, 0=unseen)
+  const buf = [];
+  for (let y = 0; y < H; y++) {
+    const row = [];
+    for (let x = 0; x < W; x++) {
+      const v = s.mask[y][x];
+      const ch = s.grid[y][x];
+      if (v === '0') row.push({ c: ' ', col: '#000' });
+      else if (v === '1') row.push({ c: ch === '#' ? '#' : (ch === '>' || ch === '<' || ch === '^' ? ch : '.'), col: '#262d3b' });
+      else row.push({ c: ch, col: TERRAIN_COLOR[ch] || '#445' });
+    }
+    buf.push(row);
   }
-  // render to HTML spans (group by color for speed)
-  let html = '', curCol = null, run = '';
-  const flush = () => { if (run) { html += `<span style="color:${curCol}">${esc(run)}</span>`; run=''; } };
-  for (let y = 0; y < buf.length; y++) {
-    for (let x = 0; x < buf[y].length; x++) {
+  // entities (server only sends those in view)
+  for (const it of s.items) buf[it.y][it.x] = { c: it.g, col: ITEM_COLOR[it.g] || '#fff' };
+  for (const mo of s.monsters) buf[mo.y][mo.x] = { c: mo.g, col: MON_COLOR[mo.g] || '#ff5d5d' };
+  for (const o of s.others) buf[o.y][o.x] = o.me
+    ? { c: '@', col: '#ffffff' }
+    : { c: '&', col: o.color };
+
+  // group consecutive same-color chars into spans
+  let html = '', cur = null, run = '';
+  const flush = () => { if (run) { html += `<span style="color:${cur}">${esc(run)}</span>`; run = ''; } };
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
       const cell = buf[y][x];
-      const col = cell.me ? '#ffffff' : cell.col;
-      const c = cell.me ? '@' : cell.c;
-      if (col !== curCol) { flush(); curCol = col; }
-      run += c;
+      if (cell.col !== cur) { flush(); cur = cell.col; }
+      run += cell.c;
     }
     run += '\n';
   }
   flush();
   $('map').innerHTML = html;
 
-  // HUD for me
-  const me = s.players.find(p => p.id === myId);
-  if (me) {
-    $('dead').style.display = me.alive ? 'none' : 'block';
-    $('hpTxt').textContent = `${Math.max(0, me.hp)} / ${me.maxhp}`;
-    $('hpBar').style.width = clamp01(me.hp / me.maxhp) + '%';
-    $('lvl').textContent = me.level;
-    $('xpBar').style.width = clamp01(me.xp / me.next) + '%';
-    $('atk').textContent = me.atk; $('gold').textContent = me.gold; $('pot').textContent = me.potions;
-  }
-  // roster sorted by kills
-  const ros = $('roster');
-  ros.innerHTML = '';
-  [...s.players].sort((a,b) => b.kills - a.kills).forEach(p => {
+  // HUD
+  const me = s.me;
+  $('dead').style.display = me.alive ? 'none' : 'block';
+  $('amulet').style.display = me.hasAmulet ? 'block' : 'none';
+  $('hpTxt').textContent = `${me.hp} / ${me.maxhp}`;
+  $('hpBar').style.width = pct(me.hp, me.maxhp);
+  $('lvl').textContent = me.level;
+  $('xpBar').style.width = pct(me.xp, me.next);
+  const hs = me.hungerState;
+  $('hungerTxt').innerHTML = `<span style="color:${hs==='Starving'?'#ff5d5d':hs==='Weak'?'#ff8c42':hs==='Hungry'?'#ffd24e':'#7CFC00'}">${hs}</span>`;
+  $('foodBar').style.width = pct(me.hunger, me.hungerMax);
+  $('atk').textContent = me.atk + me.weaponBonus;
+  $('ac').textContent = me.armorBonus;
+  $('gold').textContent = me.gold;
+  $('pot').textContent = me.potions;
+  $('rat').textContent = me.rations;
+  $('weap').textContent = `⚔ ${me.weaponName}${me.weaponBonus?` (+${me.weaponBonus})`:''}`;
+  $('armr').textContent = `🛡 ${me.armorName}${me.armorBonus?` (+${me.armorBonus})`:''}`;
+  $('stairHint').textContent = me.onStairs === 'down' ? 'Down-stairs here — press > to descend.'
+    : me.onStairs === 'up' ? (me.depth === 1 ? 'The dungeon exit — press < to leave (need the Amulet).' : 'Up-stairs here — press < to climb.')
+    : '';
+
+  // roster
+  const ros = $('roster'); ros.innerHTML = '';
+  for (const p of s.roster) {
     const d = document.createElement('div');
-    d.innerHTML = `<span style="color:${p.color}">${p.id===myId?'@':'&'} ${esc(p.name)}${p.alive?'':' ☠'}</span>`
-      + `<span class="sys">Lv${p.level} · ${p.kills}⚔ · ${p.gold}🪙</span>`;
+    d.innerHTML = `<span style="color:${p.color}">${p.me?'@':'&'} ${esc(p.name)}${p.alive?'':' ☠'}${p.amulet?' "':''}</span>`
+      + `<span class="sys">D${p.depth} · Lv${p.level} · ${p.kills}⚔ · ${p.gold}🪙</span>`;
     ros.appendChild(d);
-  });
+  }
 }
 
 const esc = (s) => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-const clamp01 = (v) => Math.max(0, Math.min(100, v * 100));
+const pct = (v, max) => Math.max(0, Math.min(100, (v / max) * 100)) + '%';
 
 // ---------- input ----------
 const KEYMAP = {
@@ -167,19 +225,20 @@ const KEYMAP = {
   y:'upleft', u:'upright', b:'downleft', n:'downright',
 };
 let held = null, moveTimer = null;
-function sendMove(dir) { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'move', dir })); }
+const sendMove = (dir) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'move', dir })); };
+const sendMsg = (o) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); };
 
 document.addEventListener('keydown', (e) => {
   if (document.activeElement === $('cmd')) {
-    if (e.key === 'Enter') {
-      const t = $('cmd').value.trim();
-      if (t) ws.send(JSON.stringify({ t:'chat', text:t }));
-      $('cmd').value = ''; $('cmd').blur();
-    } else if (e.key === 'Escape') { $('cmd').value=''; $('cmd').blur(); }
+    if (e.key === 'Enter') { const t = $('cmd').value.trim(); if (t) sendMsg({ t:'chat', text:t }); $('cmd').value=''; $('cmd').blur(); }
+    else if (e.key === 'Escape') { $('cmd').value=''; $('cmd').blur(); }
     return;
   }
   if (e.key === 'Enter') { $('cmd').focus(); e.preventDefault(); return; }
-  if (e.key === 'q' || e.key === 'Q') { ws.send(JSON.stringify({ t:'quaff' })); return; }
+  if (e.key === 'q' || e.key === 'Q') { sendMsg({ t:'quaff' }); return; }
+  if (e.key === 'e' || e.key === 'E') { sendMsg({ t:'eat' }); return; }
+  if (e.key === '>') { sendMsg({ t:'descend' }); return; }
+  if (e.key === '<') { sendMsg({ t:'ascend' }); return; }
   const dir = KEYMAP[e.key];
   if (dir) {
     e.preventDefault();

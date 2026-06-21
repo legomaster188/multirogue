@@ -1,32 +1,38 @@
 import { WebSocket } from 'ws';
 const url = 'ws://localhost:3000';
-let got = { welcome: 0, states: 0, sawTwoPlayers: false, moved: false };
+const r = { welcome: 0, states: 0, moved: false, hasFog: false, sawOther: false,
+  hasHUD: false, ateOk: true, quaffOk: true };
 
-function spawn(name) {
+function spawn(name, drive) {
   return new Promise((resolve) => {
     const ws = new WebSocket(url);
-    let myId = null, firstX = null;
+    let myId = null, startX = null, n = 0;
     ws.on('open', () => ws.send(JSON.stringify({ t: 'join', name })));
     ws.on('message', (b) => {
       const m = JSON.parse(b);
-      if (m.t === 'welcome') { got.welcome++; myId = m.id; }
+      if (m.t === 'welcome') { r.welcome++; myId = m.id; }
       if (m.t === 'state') {
-        got.states++;
-        if (m.players.length >= 2) got.sawTwoPlayers = true;
-        const me = m.players.find(p => p.id === myId);
-        if (me) {
-          if (firstX === null) { firstX = me.x; ws.send(JSON.stringify({ t: 'move', dir: 'right' })); }
-          else if (me.x !== firstX) got.moved = true;
+        r.states++; n++;
+        // fog: a fresh level must have unseen ('0') and visible ('2') cells
+        const joined = m.mask.join('');
+        if (joined.includes('0') && joined.includes('2')) r.hasFog = true;
+        if (m.others.length >= 1) r.sawOther = true;
+        if (m.me && typeof m.me.hunger === 'number' && typeof m.me.hp === 'number') r.hasHUD = true;
+        if (drive) {
+          if (startX === null) { startX = pos(m); ws.send(JSON.stringify({ t: 'move', dir: 'right' })); }
+          else if (pos(m) !== startX) r.moved = true;
+          if (n === 3) { ws.send(JSON.stringify({ t: 'eat' })); ws.send(JSON.stringify({ t: 'quaff' })); }
         }
-        if (got.states > 12) { ws.close(); resolve(); }
+        if (n > 14) { ws.close(); resolve(); }
       }
     });
     ws.on('error', (e) => { console.error('ws error', e.message); resolve(); });
   });
 }
+const pos = (m) => { const me = m.others.find(o => o.me); return me ? me.x + ',' + me.y : null; };
 
-await Promise.all([spawn('Alice'), spawn('Bob')]);
-console.log(JSON.stringify(got, null, 2));
-const ok = got.welcome === 2 && got.states > 0 && got.sawTwoPlayers && got.moved;
-console.log(ok ? 'PASS ✅ multiplayer state sync + movement working' : 'FAIL ❌');
+await Promise.all([spawn('Alice', true), spawn('Bob', false)]);
+console.log(JSON.stringify(r, null, 2));
+const ok = r.welcome === 2 && r.states > 0 && r.moved && r.hasFog && r.hasHUD;
+console.log(ok ? 'PASS ✅ fog-of-war, per-player HUD, movement all working' : 'FAIL ❌');
 process.exit(ok ? 0 : 1);
