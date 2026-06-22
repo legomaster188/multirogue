@@ -17,7 +17,8 @@ function spawn(name, drive, cls) {
         const joined = m.mask.join('');
         if (joined.includes('0') && joined.includes('2')) r.hasFog = true;
         if (m.others.length >= 1) r.sawOther = true;
-        if (m.me && typeof m.me.hunger === 'number' && typeof m.me.hp === 'number') r.hasHUD = true;
+        if (m.me && typeof m.me.hunger === 'number' && typeof m.me.hp === 'number'
+          && typeof m.me.atkTotal === 'number' && Array.isArray(m.me.rings) && Array.isArray(m.me.wands)) r.hasHUD = true;
         if (m.me && m.me.className) r.gotClass = true;
         if (m.me && cls === 'mage' && m.me.ranged) r.mageRanged = true;
         if (drive) {

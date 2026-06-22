@@ -136,6 +136,13 @@ const ARMORS  = ['', 'leather armor', 'studded leather', 'ring mail', 'chain mai
 function makeWeapon(depth) { const b = clamp(1 + rnd(2) + Math.floor(depth / 2), 1, WEAPONS.length - 1); return { kind: 'weapon', bonus: b, name: WEAPONS[b] }; }
 function makeArmor(depth)  { const b = clamp(1 + rnd(2) + Math.floor(depth / 2), 1, ARMORS.length - 1);  return { kind: 'armor',  bonus: b, name: ARMORS[b] }; }
 
+const RING_NAME = { protect: 'protection', strength: 'strength', regen: 'regeneration' };
+function makeRing(depth) { const type = pick(['protect', 'strength', 'regen']); const bonus = clamp(1 + rnd(2) + Math.floor(depth / 3), 1, 4);
+  return { kind: 'ring', type, bonus, name: `ring of ${RING_NAME[type]}` }; }
+const WAND_SPEC = { force: { dmg: 9, name: 'wand of force' }, flame: { dmg: 14, name: 'wand of flame' }, frost: { dmg: 11, name: 'wand of frost' } };
+function makeWand(depth) { const type = pick(Object.keys(WAND_SPEC)); const s = WAND_SPEC[type];
+  return { kind: 'wand', type, name: s.name, dmg: s.dmg + depth, charges: 3 + rnd(4) }; }
+
 function populate(level) {
   const monCount = 5 + level.depth * 2;
   for (let i = 0; i < monCount; i++) spawnMonster(level);
@@ -147,6 +154,8 @@ function populate(level) {
   for (let i = 0; i < 1 + (level.depth >> 2); i++) drop({ kind: rnd(2) ? 'scroll_map' : 'scroll_tele' });
   if (rnd(2) === 0) drop(makeWeapon(level.depth));
   if (rnd(2) === 0) drop(makeArmor(level.depth));
+  if (rnd(3) === 0) drop(makeRing(level.depth));
+  if (rnd(3) === 0) drop(makeWand(level.depth));
 
   for (let i = 0; i < level.depth; i++) {
     const p = freeTile(level);
@@ -226,7 +235,7 @@ function makePlayer(id, ws, name, clsKey) {
     weaponBonus: c.weapon, weaponName: c.weapon ? WEAPONS[c.weapon] : 'bare fists',
     armorBonus: c.armor, armorName: c.armor ? ARMORS[c.armor] : 'no armor',
     ranged: c.ranged, rdmg: c.rdmg || 0, rrange: c.rrange || 0, rcd: c.rcd || 0,
-    ammoName: c.ammo || '', fireCd: 0,
+    ammoName: c.ammo || '', fireCd: 0, rings: [], wands: [],
     poison: 0, hasAmulet: false, won: false,
     downed: false, downedUntil: 0,
     kills: 0, deaths: 0, moveCd: 0,
@@ -298,6 +307,11 @@ function levelUp(p) {
   }
 }
 
+// ---------- ring effects (worn rings stack by type) ----------
+const ringSum = (p, type) => p.rings.reduce((a, r) => a + (r.type === type ? r.bonus : 0), 0);
+const totalATK = (p) => p.atk + p.weaponBonus + ringSum(p, 'strength');
+const totalAC = (p) => p.armorBonus + ringSum(p, 'protect');
+
 // ---------- combat ----------
 function damageMonster(p, m, dmg, verb) {
   m.hp -= dmg;
@@ -312,33 +326,57 @@ function damageMonster(p, m, dmg, verb) {
   }
 }
 
-function playerAttack(p, m) { damageMonster(p, m, p.atk + p.weaponBonus + rnd(3), 'You hit'); }
+function playerAttack(p, m) { damageMonster(p, m, totalATK(p) + rnd(3), 'You hit'); }
 
-function fireBolt(p) {
-  if (!p.alive) return;
-  if (!p.ranged) { sendLog(p, 'You have no ranged weapon.', 'sys'); return; }
-  if (tick < p.fireCd) { sendLog(p, 'Your ranged attack is not ready.', 'sys'); return; }
+// shared ranged: hit the nearest visible monster within range; returns the target or null
+function shootNearest(p, dmg, range, verb, color) {
   const lvl = getLevel(p.depth);
   const vis = computeVisible(lvl, p.x, p.y);
   let target = null, best = Infinity;
   for (const m of lvl.monsters) {
-    if (m.hp <= 0 || !vis.has(m.y * W + m.x)) continue;
+    if (m.hp <= 0 || m.shop || !vis.has(m.y * W + m.x)) continue;
     const dd = chebyshev(p, m);
-    if (dd <= p.rrange && dd < best) { best = dd; target = m; }
+    if (dd <= range && dd < best) { best = dd; target = m; }
   }
-  if (!target) { sendLog(p, 'No target in sight.', 'sys'); return; }
-  p.fireCd = tick + p.rcd;
-  broadcastFx(p.depth, { t: 'fx', kind: 'bolt', color: p.color, from: { x: p.x, y: p.y }, to: { x: target.x, y: target.y } });
-  damageMonster(p, target, p.rdmg + Math.floor(p.level / 2) + rnd(3), `Your ${p.ammoName} strikes`);
+  if (!target) return null;
+  broadcastFx(p.depth, { t: 'fx', kind: 'bolt', color: color || p.color, from: { x: p.x, y: p.y }, to: { x: target.x, y: target.y } });
+  damageMonster(p, target, dmg, verb);
+  return target;
+}
+
+function fireBolt(p) {
+  if (!p.alive) return;
+  if (!p.ranged) { sendLog(p, 'You have no ranged weapon (try a wand with Z).', 'sys'); return; }
+  if (tick < p.fireCd) { sendLog(p, 'Your ranged attack is not ready.', 'sys'); return; }
+  const dmg = p.rdmg + Math.floor(p.level / 2) + ringSum(p, 'strength') + rnd(3);
+  if (shootNearest(p, dmg, p.rrange, `Your ${p.ammoName} strikes`)) p.fireCd = tick + p.rcd;
+  else sendLog(p, 'No target in sight.', 'sys');
+}
+
+function zapWand(p) {
+  if (!p.alive) return;
+  const w = p.wands.find(w => w.charges > 0);
+  if (!w) { sendLog(p, p.wands.length ? 'Your wands are all spent.' : 'You have no wand.', 'sys'); return; }
+  const hit = shootNearest(p, w.dmg + rnd(4), 8, `Your ${w.name} blasts`, '#b07cff');
+  if (hit) { w.charges--; if (w.charges <= 0) sendLog(p, `The ${w.name} crumbles to dust.`, 'sys'); }
+  else sendLog(p, 'No target in sight.', 'sys');
+  p.wands = p.wands.filter(w => w.charges > 0);
 }
 
 function monsterAttack(m, p) {
-  let dmg = m.atk + rnd(3) - p.armorBonus;      // armor class soaks damage
-  dmg = Math.max(1, dmg);
+  let dmg = Math.max(1, m.atk + rnd(3) - totalAC(p));      // armor class soaks damage
   p.hp -= dmg;
   sendLog(p, `The ${m.name} hits you for ${dmg}.`, 'bad');
   if (p.hp <= 0) { downPlayer(p, `a ${m.name}`); return; }
   if (m.g === 's' && rnd(2) === 0) { p.poison = Math.max(p.poison, 6); sendLog(p, 'The snake bite poisons you!', 'bad'); }
+}
+
+function monsterRanged(m, p, dmg, verb, depth) {
+  dmg = Math.max(1, dmg - totalAC(p));
+  p.hp -= dmg;
+  broadcastFx(depth, { t: 'fx', kind: 'bolt', color: '#ff5d5d', from: { x: m.x, y: m.y }, to: { x: p.x, y: p.y } });
+  sendLog(p, `The ${m.name} ${verb} for ${dmg}.`, 'bad');
+  if (p.hp <= 0) downPlayer(p, `a ${m.name}`);
 }
 
 // ---------- movement & actions ----------
@@ -379,8 +417,27 @@ function pickup(p, lvl) {
   } else if (it.kind === 'armor') {
     if (it.bonus > p.armorBonus) { p.armorBonus = it.bonus; p.armorName = it.name; sendLog(p, `You don the ${it.name} (+${it.bonus} AC).`, 'good'); }
     else { sendLog(p, `You leave the ${it.name}; your ${p.armorName} is better.`, 'sys'); return; }
+  } else if (it.kind === 'ring') {
+    if (!gainRing(p, it)) return;   // left on the ground if not an upgrade
+  } else if (it.kind === 'wand') {
+    if (p.wands.length >= 5) { sendLog(p, 'You already carry too many wands.', 'sys'); return; }
+    p.wands.push({ type: it.type, name: it.name, dmg: it.dmg, charges: it.charges });
+    sendLog(p, `You pick up a ${it.name} (${it.charges} charges).`, 'good');
   }
   lvl.items.splice(ix, 1);
+}
+
+// Equip a ring: upgrade a same-type ring, fill a free slot, or replace your weakest if better.
+function gainRing(p, ring) {
+  const same = p.rings.find(r => r.type === ring.type);
+  if (same) {
+    if (ring.bonus > same.bonus) { same.bonus = ring.bonus; same.name = ring.name; sendLog(p, `You upgrade your ${ring.name} (+${ring.bonus}).`, 'good'); return true; }
+    sendLog(p, `You leave the ${ring.name}; yours is as good.`, 'sys'); return false;
+  }
+  if (p.rings.length < 2) { p.rings.push({ type: ring.type, bonus: ring.bonus, name: ring.name }); sendLog(p, `You put on the ${ring.name} (+${ring.bonus}).`, 'good'); return true; }
+  const weakest = p.rings.reduce((a, b) => a.bonus <= b.bonus ? a : b);
+  if (ring.bonus > weakest.bonus) { sendLog(p, `You swap your ${weakest.name} for the ${ring.name}.`, 'good'); weakest.type = ring.type; weakest.bonus = ring.bonus; weakest.name = ring.name; return true; }
+  sendLog(p, `You leave the ${ring.name}; both ring fingers are full.`, 'sys'); return false;
 }
 
 function triggerTrap(p, lvl) {
@@ -445,6 +502,8 @@ function shopCatalog(p) {
     { id: 'tele',     name: 'scroll of teleportation',  price: 25 },
     { id: 'weapon',   name: `weapon upgrade (+${clamp(p.weaponBonus + 1, 1, WEAPONS.length - 1)} ATK)`, price: 50 + d * 12 },
     { id: 'armor',    name: `armor upgrade (+${clamp(p.armorBonus + 1, 1, ARMORS.length - 1)} AC)`,      price: 50 + d * 12 },
+    { id: 'ring',     name: 'a random ring',             price: 90 + d * 8 },
+    { id: 'wand',     name: 'a charged wand',            price: 70 + d * 8 },
   ];
 }
 
@@ -470,6 +529,12 @@ function buy(p, id) {
   else if (id === 'tele') p.scrollTele++;
   else if (id === 'weapon') { p.weaponBonus = clamp(p.weaponBonus + 1, 1, WEAPONS.length - 1); p.weaponName = WEAPONS[p.weaponBonus]; }
   else if (id === 'armor') { p.armorBonus = clamp(p.armorBonus + 1, 1, ARMORS.length - 1); p.armorName = ARMORS[p.armorBonus]; }
+  else if (id === 'ring') { if (!gainRing(p, makeRing(p.depth))) { p.gold += item.price; openShop(p); return; } }
+  else if (id === 'wand') {
+    if (p.wands.length >= 5) { p.gold += item.price; sendLog(p, 'You carry too many wands already.', 'sys'); openShop(p); return; }
+    const w = makeWand(p.depth); p.wands.push({ type: w.type, name: w.name, dmg: w.dmg, charges: w.charges });
+    sendLog(p, `You buy a ${w.name} (${w.charges} charges).`, 'good'); openShop(p); return;
+  }
   sendLog(p, `You buy the ${item.name} for ${item.price} gold.`, 'good');
   openShop(p);   // refresh prices/affordability
 }
@@ -529,8 +594,12 @@ function tickMonsters(level) {
     }
     let nx = m.x, ny = m.y;
     if (target) {
+      if (m.g === 'D' && best >= 2 && best <= 4 && rnd(2) === 0) {  // dragons breathe fire at range
+        monsterRanged(m, target, m.atk, 'breathes fire at you', level.depth); continue;
+      }
       if (best === 1) { monsterAttack(m, target); continue; }
-      nx += Math.sign(target.x - m.x); ny += Math.sign(target.y - m.y);
+      if (m.g === 'b' && rnd(2) === 0) { const d = pick(Object.values(DIRS)); nx += d[0]; ny += d[1]; }  // bats flit erratically
+      else { nx += Math.sign(target.x - m.x); ny += Math.sign(target.y - m.y); }
     } else {
       const d = pick(Object.values(DIRS)); nx += d[0]; ny += d[1];
     }
@@ -573,6 +642,7 @@ wss.on('connection', (ws) => {
     if (!player) return;
     if (msg.t === 'move') tryMove(player, msg.dir);
     else if (msg.t === 'fire') fireBolt(player);
+    else if (msg.t === 'zap') zapWand(player);
     else if (msg.t === 'quaff') quaff(player, msg.color);
     else if (msg.t === 'buy') buy(player, msg.id);
     else if (msg.t === 'eat') eat(player);
@@ -584,6 +654,11 @@ wss.on('connection', (ws) => {
       player.hp -= (msg.n || 999);
       if (player.hp <= 0) downPlayer(player, 'the testing void');
     }
+    else if (msg.t === '_give' && process.env.MR_TEST) {    // test-only: grant items (inert in production)
+      if (msg.what === 'gold') player.gold += (msg.n || 100);
+      else if (msg.what === 'wand') { const w = makeWand(player.depth); player.wands.push({ type: w.type, name: w.name, dmg: w.dmg, charges: w.charges }); }
+      else if (msg.what === 'ring') gainRing(player, { kind: 'ring', type: msg.rtype || 'strength', bonus: 3, name: `ring of ${RING_NAME[msg.rtype || 'strength']}` });
+    }
     else if (msg.t === 'chat') {
       const text = String(msg.text || '').slice(0, 120);
       if (text) broadcast({ t: 'chat', name: player.name, color: player.color, text });
@@ -593,7 +668,7 @@ wss.on('connection', (ws) => {
 });
 
 // ---------- per-player snapshot ----------
-const ITEM_GLYPH = { gold: '$', potion: '!', food: '%', weapon: ')', armor: '[', amulet: '"', scroll_map: '?', scroll_tele: '?' };
+const ITEM_GLYPH = { gold: '$', potion: '!', food: '%', weapon: ')', armor: '[', amulet: '"', scroll_map: '?', scroll_tele: '?', ring: '=', wand: '/' };
 
 function snapshotFor(p) {
   const lvl = getLevel(p.depth);
@@ -637,6 +712,9 @@ function snapshotFor(p) {
       hp: Math.max(0, p.hp), maxhp: p.maxhp, atk: p.atk, weaponBonus: p.weaponBonus, weaponName: p.weaponName,
       armorBonus: p.armorBonus, armorName: p.armorName, level: p.level, xp: p.xp, next: p.next,
       gold: p.gold, potions, potionCount: potionCount(p), rations: p.rations, scrollMap: p.scrollMap, scrollTele: p.scrollTele,
+      atkTotal: totalATK(p), acTotal: totalAC(p),
+      rings: p.rings.map(r => ({ name: r.name, bonus: r.bonus })),
+      wands: p.wands.map(w => ({ name: w.name, charges: w.charges })),
       hunger: p.hunger, hungerMax: HUNGER_MAX, hungerState: hungerState(p.hunger),
       depth: p.depth, kills: p.kills, deaths: p.deaths, className: p.className,
       alive: p.alive, hasAmulet: p.hasAmulet, poisoned: p.poison > 0,
@@ -660,6 +738,8 @@ setInterval(() => {
   for (const p of players.values()) {
     if (p.alive) {
       p.moves = p.haste > tick ? 2 : 1;   // haste grants an extra step each tick
+      const regen = ringSum(p, 'regen');
+      if (regen > 0 && p.hp < p.maxhp && tick % 6 === 0) p.hp = clamp(p.hp + regen, 0, p.maxhp);
       if (p.poison > 0 && tick % 3 === 0) {
         p.hp -= 2; p.poison--;
         if (p.hp <= 0) { downPlayer(p, 'poison'); continue; }

@@ -20,6 +20,8 @@ Open the URL in a browser (multiple tabs, or other machines on your network via
 | `WASD` / arrows | move (bump a monster to attack; bump a fallen ally to revive) |
 | `Y U B N` | move diagonally |
 | `F` | fire ranged attack at the nearest visible foe (Mage/Ranger) |
+| `Z` | zap a wand at the nearest foe (any class) |
+| `M` | toggle sound |
 | `>` / `<` | descend / climb stairs (while standing on them) |
 | `Q` | quaff your first potion |
 | `1`–`9` | quaff a specific potion from your belt (or click it) |
@@ -28,6 +30,7 @@ Open the URL in a browser (multiple tabs, or other machines on your network via
 | `Enter` | chat with the party |
 
 On phones/tablets an on-screen **D-pad and action buttons** appear automatically.
+Retro **sound effects** play for hits, damage, zaps, and victory — toggle with `M`.
 
 ### Classes
 
@@ -51,6 +54,10 @@ stays cleared and the party can split across depths.
   with `E` or you'll starve to death.
 - **Gear:** pick up weapons (`)`) for `+ATK` and armor (`[`) for armor class, which soaks
   incoming damage. Better gear auto-equips.
+- **Rings** (`=`): wear up to two — *protection* (+AC), *strength* (+ATK), or
+  *regeneration* (heal over time). They auto-equip when they're an upgrade.
+- **Wands** (`/`): charged ranged blasts (*force / flame / frost*) that **any** class can
+  zap with `Z` — so even Warriors get some reach. Charges deplete, then the wand crumbles.
 - **Ranged combat:** Mages and Rangers press `F` to strike the nearest foe in sight — a
   bolt streaks across the map. Warriors fight up close.
 - **Potions** (`!`) come in random colours each run — drink one to learn what it does
@@ -65,7 +72,8 @@ stays cleared and the party can split across depths.
   a big bonus for escaping with the Amulet). Top runs persist across sessions.
 - **Loot & combat:** grab `$` gold and `!` potions; kill monsters
   (`b`at → `r`at → `k`obold → `s`nake → `o`rc → `z`ombie → `T`roll → `D`ragon, scaling with
-  depth) for XP and level up (+HP/+ATK). Slain monsters may drop gold. **Snakes poison** you.
+  depth) for XP and level up (+HP/+ATK). Slain monsters may drop gold. **Snakes poison** you,
+  **bats** flit erratically, and **dragons breathe fire** at range — keep your distance and AC up.
 - **Traps** (`^`) hide in the floor — dart traps wound you, trap doors fling you across
   the level. They reveal once sprung.
 - **Co-op revive:** when you fall you become **downed** (`%`) for 18 seconds. An ally who
@@ -101,10 +109,12 @@ For a quick public link from your own machine, a tunnel works too:
   lives here, so clients can't cheat or see through walls.
 - `test-client.mjs` — headless smoke test (fog-of-war, HUD, classes, ranged, movement).
 - `test-descend.mjs` — pathfinding bot that explores, descends, and climbs back.
-- `test-coop.mjs` — verifies ranged combat and the downed → revive co-op loop. Run the
-  server with `MR_TEST=1` first (it enables an inert-in-production self-damage test hook).
+- `test-coop.mjs` — verifies the downed → revive co-op loop. Run the server with `MR_TEST=1`
+  first (it enables inert-in-production test hooks for deterministic self-damage / item grants).
 - `test-shop.mjs` — a bot descends to the merchant floor, opens the shop, and quaffs a
   typed potion.
+- `test-items.mjs` — grants a ring + wand (via the `MR_TEST` hook) and verifies stat
+  bonuses, wand inventory, and zapping. Run with `MR_TEST=1`.
 
 Authoritative-server design means all players always agree on the world state, and
 since visibility is computed server-side, the unexplored map is never sent to a client.

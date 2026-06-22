@@ -72,6 +72,8 @@
   #acts { display:grid; grid-template-columns:1fr 1fr; gap:4px; opacity:.9; }
   #acts button { font-size:13px; padding:8px 6px; }
   @media (pointer:coarse), (max-width:760px) { #touch { display:flex; } }
+  #mute { position:fixed; top:8px; right:10px; z-index:25; font-family:inherit; cursor:pointer;
+    background:#05070c; color:var(--ink); border:1px solid #2c3447; border-radius:6px; padding:4px 8px; }
 </style>
 </head>
 <body>
@@ -96,6 +98,7 @@
 </div>
 
 <div id="banner"></div>
+<button id="mute" title="mute sound (M)">🔊</button>
 
 <div id="shop">
   <div id="shopBox">
@@ -114,6 +117,7 @@
   </div>
   <div id="acts">
     <button data-msg="fire">🔥 Fire</button>
+    <button data-msg="zap">🪄 Zap</button>
     <button data-act="quaff">⚗ Quaff</button>
     <button data-msg="eat">🍖 Eat</button>
     <button data-msg="readmap">📜 Map</button>
@@ -131,6 +135,7 @@
       <span style="color:var(--gold)">$</span> gold &nbsp; <span style="color:#7CFC00">!</span> potion &nbsp;
       <span style="color:#caa15a">%</span> food &nbsp; <span style="color:#9fd0ff">)</span> weapon &nbsp;
       <span style="color:#9fd0ff">[</span> armor &nbsp; <span style="color:#caa15a">?</span> scroll &nbsp;
+      <span style="color:#b07cff">=</span> ring &nbsp; <span style="color:#52ffb8">/</span> wand &nbsp;
       <span style="color:#ff8c42">^</span> trap &nbsp; <span style="color:#fff">&gt;&lt;</span> stairs &nbsp;
       <span style="color:var(--gold)">"</span> Amulet &nbsp; <span style="color:#7a2a2a">%</span> fallen ally &nbsp;
       <span style="color:#ff5d5d">b r k s o z T D</span> monsters &nbsp; <span style="color:#b07cff">W</span> boss &nbsp;
@@ -159,6 +164,7 @@
       <div class="row sys" style="font-size:12px;">
         <span id="weap"></span><span id="armr"></span>
       </div>
+      <div id="gear2" class="sys" style="font-size:12px;"></div>
       <div id="potList" style="font-size:12px;margin-top:4px;"></div>
       <div id="status"></div>
       <div id="stairHint" class="sys" style="font-size:12px;margin-top:4px;"></div>
@@ -184,6 +190,26 @@ const $ = (id) => document.getElementById(id);
 let ws, myId = null, W = 0, H = 0, lastState = null, chosenClass = 'warrior', myPotions = [];
 const quaffIndex = (i) => { if (myPotions[i]) sendMsg({ t: 'quaff', color: myPotions[i].color }); };
 
+// ---------- sound (WebAudio synth) ----------
+let audioCtx = null, muted = localStorage.getItem('mr_mute') === '1';
+function initAudio() { try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch {} }
+function beep(freq, dur = 0.08, type = 'square', vol = 0.05) {
+  if (!audioCtx || muted) return;
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.type = type; o.frequency.value = freq; o.connect(g); g.connect(audioCtx.destination);
+  const t = audioCtx.currentTime;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.start(t); o.stop(t + dur);
+}
+const SOUND = {
+  hit:  () => beep(880, 0.05, 'square'),
+  bad:  () => beep(150, 0.13, 'sawtooth', 0.06),
+  good: () => beep(660, 0.09, 'triangle'),
+  zap:  () => { beep(1200, 0.05, 'sawtooth'); setTimeout(() => beep(700, 0.06, 'sawtooth'), 40); },
+  win:  () => [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => beep(f, 0.16, 'triangle', 0.06), i * 130)),
+};
+function toggleMute() { muted = !muted; localStorage.setItem('mr_mute', muted ? '1' : '0'); const b = $('mute'); if (b) b.textContent = muted ? '🔇' : '🔊'; }
+
 function connect(name) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}`);
@@ -196,14 +222,15 @@ let fxList = [];   // transient ranged-bolt effects: {cells:[{x,y}], col, until}
 function handle(m) {
   if (m.t === 'welcome') { myId = m.id; W = m.w; H = m.h; }
   else if (m.t === 'state') render(m);
-  else if (m.t === 'log') addLog(m.text, m.cls);
+  else if (m.t === 'log') { addLog(m.text, m.cls); if (SOUND[m.cls]) SOUND[m.cls](); }
   else if (m.t === 'chat') addLog(`${m.name}: ${m.text}`, 'chat', m.color);
   else if (m.t === 'fx' && m.kind === 'bolt') {
+    SOUND.zap();
     fxList.push({ cells: line(m.from, m.to), col: m.color, until: Date.now() + 180 });
     if (lastState) { render(lastState); setTimeout(() => lastState && render(lastState), 190); }
   }
   else if (m.t === 'shop') openShopUI(m);
-  else if (m.t === 'win') showBanner(`🏆 VICTORY! You escaped with the Amulet. Score ${m.score}.`);
+  else if (m.t === 'win') { showBanner(`🏆 VICTORY! You escaped with the Amulet. Score ${m.score}.`); SOUND.win(); }
 }
 
 // ---------- shop ----------
@@ -259,7 +286,7 @@ function addLog(text, cls, color) {
 
 const TERRAIN_COLOR = { '#':'#3b4456', '.':'#2a3344', '>':'#ffffff', '<':'#ffffff', '^':'#ff8c42', ' ':'#000' };
 const MON_COLOR = { b:'#9aa', r:'#b98', k:'#caa15a', s:'#6ab04c', o:'#6ab04c', z:'#8a8', T:'#3aa0c0', D:'#ff5d5d', W:'#b07cff', P:'#ffd24e' };
-const ITEM_COLOR = { '$':'#ffd24e', '!':'#7CFC00', '%':'#caa15a', ')':'#9fd0ff', '[':'#9fd0ff', '"':'#ff6ec7' };
+const ITEM_COLOR = { '$':'#ffd24e', '!':'#7CFC00', '%':'#caa15a', ')':'#9fd0ff', '[':'#9fd0ff', '"':'#ff6ec7', '?':'#caa15a', '=':'#b07cff', '/':'#52ffb8' };
 
 function render(s) {
   lastState = s;
@@ -317,14 +344,18 @@ function render(s) {
   const hs = me.hungerState;
   $('hungerTxt').innerHTML = `<span style="color:${hs==='Starving'?'#ff5d5d':hs==='Weak'?'#ff8c42':hs==='Hungry'?'#ffd24e':'#7CFC00'}">${hs}</span>`;
   $('foodBar').style.width = pct(me.hunger, me.hungerMax);
-  $('atk').textContent = me.atk + me.weaponBonus;
-  $('ac').textContent = me.armorBonus;
+  $('atk').textContent = me.atkTotal;
+  $('ac').textContent = me.acTotal;
   $('gold').textContent = me.gold;
   $('pot').textContent = me.potionCount;
   $('rat').textContent = me.rations;
   $('scr').textContent = me.scrollMap + me.scrollTele;
   $('weap').textContent = `⚔ ${me.weaponName}${me.weaponBonus?` (+${me.weaponBonus})`:''}`;
   $('armr').textContent = `🛡 ${me.armorName}${me.armorBonus?` (+${me.armorBonus})`:''}`;
+  $('gear2').innerHTML = [
+    me.rings.length ? '💍 ' + me.rings.map(r => `${esc(r.name.replace('ring of ',''))} +${r.bonus}`).join(', ') : '',
+    me.wands.length ? '🪄 ' + me.wands.map(w => `${esc(w.name.replace('wand of ',''))}(${w.charges})`).join(', ') : '',
+  ].filter(Boolean).join(' &nbsp; ');
   // potion inventory (clickable + number hotkeys)
   myPotions = me.potions;
   const pl = $('potList');
@@ -336,6 +367,7 @@ function render(s) {
   if (me.hasted) st.push(`<span style="color:#ffd24e">⚡ Hasted ${me.hasteLeft}s</span>`);
   if (me.poisoned) st.push('<span style="color:#7CFC00">☣ Poisoned</span>');
   if (me.ranged) st.push(me.fireReady ? '<span style="color:#9fd0ff">➶ Fire ready (F)</span>' : '<span class="sys">➶ Fire charging…</span>');
+  if (me.wands.length) st.push(`<span style="color:#52ffb8">🪄 Zap (Z)</span>`);
   if (me.scrollMap) st.push(`<span class="sys">📜 map ×${me.scrollMap} (R)</span>`);
   if (me.scrollTele) st.push(`<span class="sys">📜 tele ×${me.scrollTele} (T)</span>`);
   $('status').innerHTML = st.join(' &nbsp; ');
@@ -386,8 +418,10 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'q' || e.key === 'Q') { sendMsg({ t:'quaff' }); return; }
   if (e.key === 'e' || e.key === 'E') { sendMsg({ t:'eat' }); return; }
   if (e.key === 'f' || e.key === 'F') { sendMsg({ t:'fire' }); return; }
+  if (e.key === 'z' || e.key === 'Z') { sendMsg({ t:'zap' }); return; }
   if (e.key === 'r' || e.key === 'R') { sendMsg({ t:'readmap' }); return; }
   if (e.key === 't' || e.key === 'T') { sendMsg({ t:'readtele' }); return; }
+  if (e.key === 'm' || e.key === 'M') { toggleMute(); return; }
   if (e.key === '>') { sendMsg({ t:'descend' }); return; }
   if (e.key === '<') { sendMsg({ t:'ascend' }); return; }
   const dir = KEYMAP[e.key];
@@ -405,6 +439,7 @@ document.addEventListener('keyup', (e) => {
 function start() {
   const name = $('nameIn').value.trim() || 'Hero';
   $('overlay').style.display = 'none';
+  initAudio(); if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
   connect(name);
 }
 // class picker
@@ -416,6 +451,10 @@ document.querySelector('.cls[data-cls="warrior"]').classList.add('sel');
 $('playBtn').onclick = start;
 $('nameIn').addEventListener('keydown', e => { if (e.key === 'Enter') start(); });
 $('nameIn').focus();
+
+// mute toggle
+$('mute').textContent = muted ? '🔇' : '🔊';
+$('mute').onclick = toggleMute;
 
 // shop close
 $('shopClose').onclick = closeShop;
