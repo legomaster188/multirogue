@@ -2,6 +2,7 @@ node_modules/
 *.log
 .DS_Store
 .env
+scores.json
 
 # pre-existing machine content, not part of this project
 .claude/

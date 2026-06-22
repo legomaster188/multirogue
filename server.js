@@ -3,7 +3,7 @@
 // field-of-view, a hunger clock, weapons/armor with armor class, traps,
 // stairs up/down, and the Amulet of Yendor as the win condition.
 import { createServer } from 'http';
-import { readFile } from 'fs/promises';
+import { readFile, writeFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { dirname, join, extname } from 'path';
 import { WebSocketServer } from 'ws';
@@ -36,6 +36,31 @@ const W = 60, H = 34;
 const WALL = '#', FLOOR = '.', DOWN = '>', UP = '<';
 const AMULET_DEPTH = 8;          // Amulet of Yendor lives this deep
 let amuletSpawned = false;       // there is only ever one
+
+// ---------- potions: colours map to types, randomized per server run ----------
+const POTION_COLORS = ['ruby', 'azure', 'verdant', 'amber', 'violet', 'silvery', 'murky', 'fizzy'];
+const POTION_TYPE_POOL = ['healing', 'healing', 'healing', 'strength', 'speed', 'speed', 'harm', 'strength'];
+const potionType = {};           // colour -> type (fixed for this run)
+const potionKnown = new Set();   // colours the party has identified
+(function assignPotions() {
+  const pool = [...POTION_TYPE_POOL];
+  for (let i = pool.length - 1; i > 0; i--) { const j = rnd(i + 1); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+  POTION_COLORS.forEach((c, i) => potionType[c] = pool[i] || 'healing');
+})();
+const colorForType = (type) => POTION_COLORS.find(c => potionType[c] === type) || POTION_COLORS[0];
+potionKnown.add(colorForType('healing'));  // everyone starts knowing their healing potion
+
+// ---------- persistent Hall of Fame ----------
+let leaderboard = [];
+const scoresPath = join(__dirname, 'scores.json');
+readFile(scoresPath, 'utf8').then(s => { leaderboard = JSON.parse(s); }).catch(() => {});
+function recordScore(p, won) {
+  const score = p.gold + p.level * 100 + p.kills * 25 + p.depth * 50 + (won ? 1000 : 0);
+  leaderboard.push({ name: p.name, cls: p.className, depth: p.depth, kills: p.kills, score, won });
+  leaderboard.sort((a, b) => b.score - a.score);
+  leaderboard = leaderboard.slice(0, 10);
+  writeFile(scoresPath, JSON.stringify(leaderboard)).catch(() => {});
+}
 
 // ---------- dungeon generation: rooms + corridors ----------
 function genLevel(depth) {
@@ -117,7 +142,7 @@ function populate(level) {
 
   const drop = (it) => { const p = freeTile(level); level.items.push({ x: p.x, y: p.y, ...it }); };
   for (let i = 0; i < 3 + level.depth; i++) drop({ kind: 'gold', amt: 5 + rnd(10 + level.depth * 4) });
-  for (let i = 0; i < 2 + (level.depth >> 1); i++) drop({ kind: 'potion' });
+  for (let i = 0; i < 2 + (level.depth >> 1); i++) drop({ kind: 'potion', color: pick(POTION_COLORS) });
   for (let i = 0; i < 2; i++) drop({ kind: 'food' });
   for (let i = 0; i < 1 + (level.depth >> 2); i++) drop({ kind: rnd(2) ? 'scroll_map' : 'scroll_tele' });
   if (rnd(2) === 0) drop(makeWeapon(level.depth));
@@ -127,6 +152,13 @@ function populate(level) {
     const p = freeTile(level);
     if (level.grid[p.y][p.x] !== FLOOR) continue;
     level.traps.push({ x: p.x, y: p.y, kind: rnd(3) === 0 ? 'teleport' : 'dart', known: false, dmg: 3 + rnd(level.depth * 2) });
+  }
+
+  // a travelling merchant sets up shop every few floors
+  if (level.depth % 3 === 0 && level.depth !== AMULET_DEPTH) {
+    const p = freeTile(level);
+    level.monsters.push({ id: 'shop' + (monNo++), g: 'P', name: 'merchant', shop: true,
+      hp: 999, maxhp: 999, atk: 0, xp: 0, speed: 99, sight: 0, x: p.x, y: p.y, cd: 0 });
   }
 
   if (level.depth === AMULET_DEPTH && !amuletSpawned) {
@@ -189,7 +221,8 @@ function makePlayer(id, ws, name, clsKey) {
     cls, className: c.label,
     depth: 1, x: s.x, y: s.y, alive: true,
     baseHp: c.hp, hp: c.hp, maxhp: c.hp, atk: c.atk, level: 1, xp: 0, next: 20,
-    gold: 0, potions: 1, rations: 1, scrollMap: 1, scrollTele: 0, hunger: HUNGER_MAX,
+    gold: 0, potions: { [colorForType('healing')]: 1 }, rations: 1, scrollMap: 1, scrollTele: 0, hunger: HUNGER_MAX,
+    haste: 0, moves: 1,
     weaponBonus: c.weapon, weaponName: c.weapon ? WEAPONS[c.weapon] : 'bare fists',
     armorBonus: c.armor, armorName: c.armor ? ARMORS[c.armor] : 'no armor',
     ranged: c.ranged, rdmg: c.rdmg || 0, rrange: c.rrange || 0, rcd: c.rcd || 0,
@@ -228,6 +261,7 @@ function downPlayer(p, by) {
 
 function finalDeath(p) {
   p.downed = false; p.deaths++;
+  recordScore(p, false);
   const lost = Math.floor(p.gold / 2); p.gold -= lost;
   respawn(p);
   broadcastLog(`${p.name} perished and returns to the entrance. (lost ${lost} gold)`, 'bad');
@@ -312,17 +346,17 @@ const DIRS = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0],
   upleft: [-1, -1], upright: [1, -1], downleft: [-1, 1], downright: [1, 1] };
 
 function tryMove(p, dir) {
-  if (!p.alive || tick < p.moveCd) return;
+  if (!p.alive || p.moves <= 0) return;
   const d = DIRS[dir]; if (!d) return;
-  p.moveCd = tick + 1;
   const lvl = getLevel(p.depth);
   const nx = clamp(p.x + d[0], 0, W - 1), ny = clamp(p.y + d[1], 0, H - 1);
   if (lvl.grid[ny][nx] === WALL) return;
   const m = monsterAt(lvl, nx, ny);
-  if (m) { playerAttack(p, m); return; }
+  if (m) { p.moves--; if (m.shop) openShop(p); else playerAttack(p, m); return; }   // bump merchant = shop
   const fallen = downedAt(p.depth, nx, ny);
-  if (fallen) { revive(p, fallen); p.moveCd = tick + 3; return; }   // revive an ally instead of stepping in
+  if (fallen) { p.moves = 0; revive(p, fallen); return; }   // revive an ally instead of stepping in
   if (playerAt(p.depth, nx, ny)) return;     // don't stack on a teammate
+  p.moves--;
   p.x = nx; p.y = ny;
   pickup(p, lvl);
   triggerTrap(p, lvl);
@@ -333,7 +367,8 @@ function pickup(p, lvl) {
   if (ix < 0) return;
   const it = lvl.items[ix];
   if (it.kind === 'gold') { p.gold += it.amt; sendLog(p, `You found ${it.amt} gold.`, 'good'); }
-  else if (it.kind === 'potion') { p.potions++; sendLog(p, 'You pick up a healing potion.', 'good'); }
+  else if (it.kind === 'potion') { const c = it.color || colorForType('healing'); p.potions[c] = (p.potions[c] || 0) + 1;
+    sendLog(p, potionKnown.has(c) ? `You pick up a ${c} potion (of ${potionType[c]}).` : `You pick up a ${c} potion.`, 'good'); }
   else if (it.kind === 'food') { p.rations++; sendLog(p, 'You pick up a food ration.', 'good'); }
   else if (it.kind === 'scroll_map') { p.scrollMap++; sendLog(p, 'You pick up a scroll of magic mapping.', 'good'); }
   else if (it.kind === 'scroll_tele') { p.scrollTele++; sendLog(p, 'You pick up a scroll of teleportation.', 'good'); }
@@ -380,12 +415,63 @@ function readTele(p) {
   sendLog(p, 'You read a scroll of teleportation and blink away.', 'good');
 }
 
-function quaff(p) {
-  if (!p.alive || p.potions <= 0) return;
-  p.potions--;
-  const heal = 15 + p.level * 2;
-  p.hp = clamp(p.hp + heal, 0, p.maxhp);
-  sendLog(p, `You quaff a potion of healing. (+${heal} HP)`, 'good');
+function potionCount(p) { return Object.values(p.potions).reduce((a, b) => a + b, 0); }
+
+function quaff(p, color) {
+  if (!p.alive) return;
+  if (!color || !(p.potions[color] > 0)) color = Object.keys(p.potions).find(c => p.potions[c] > 0);
+  if (!color || !(p.potions[color] > 0)) { sendLog(p, 'You have no potions.', 'sys'); return; }
+  p.potions[color]--;
+  if (p.potions[color] <= 0) delete p.potions[color];
+  const type = potionType[color];
+  const firstId = !potionKnown.has(color);
+  potionKnown.add(color);
+  if (type === 'healing') { const h = 15 + p.level * 2; p.hp = clamp(p.hp + h, 0, p.maxhp); sendLog(p, `You quaff the ${color} potion — soothing! (+${h} HP)`, 'good'); }
+  else if (type === 'strength') { p.atk += 2; sendLog(p, `You quaff the ${color} potion — you feel mighty! (+2 ATK)`, 'good'); }
+  else if (type === 'speed') { p.haste = tick + 80; sendLog(p, `You quaff the ${color} potion — the world slows around you!`, 'good'); }
+  else { p.hp -= 8; sendLog(p, `You quaff the ${color} potion — it burns! (-8 HP)`, 'bad'); if (p.hp <= 0) { downPlayer(p, 'a harmful potion'); return; } }
+  if (firstId) broadcastLog(`(The ${color} potion was a potion of ${type}.)`, 'sys');
+}
+
+// ---------- merchant / shop ----------
+function shopCatalog(p) {
+  const d = p.depth;
+  return [
+    { id: 'heal',     name: 'healing potion',           price: 20 + d * 4 },
+    { id: 'strength', name: 'potion of strength',        price: 70 },
+    { id: 'speed',    name: 'potion of speed',           price: 60 },
+    { id: 'food',     name: 'food ration',              price: 15 },
+    { id: 'map',      name: 'scroll of magic mapping',  price: 25 },
+    { id: 'tele',     name: 'scroll of teleportation',  price: 25 },
+    { id: 'weapon',   name: `weapon upgrade (+${clamp(p.weaponBonus + 1, 1, WEAPONS.length - 1)} ATK)`, price: 50 + d * 12 },
+    { id: 'armor',    name: `armor upgrade (+${clamp(p.armorBonus + 1, 1, ARMORS.length - 1)} AC)`,      price: 50 + d * 12 },
+  ];
+}
+
+function nearMerchant(p) {
+  const lvl = getLevel(p.depth);
+  return lvl.monsters.some(m => m.shop && Math.abs(m.x - p.x) <= 1 && Math.abs(m.y - p.y) <= 1);
+}
+
+function openShop(p) { send(p.ws, { t: 'shop', gold: p.gold, items: shopCatalog(p) }); }
+
+function buy(p, id) {
+  if (!p.alive) return;
+  if (!nearMerchant(p)) { sendLog(p, 'There is no merchant here.', 'sys'); return; }
+  const item = shopCatalog(p).find(i => i.id === id);
+  if (!item) return;
+  if (p.gold < item.price) { sendLog(p, `You can't afford the ${item.name} (${item.price} gold).`, 'bad'); return; }
+  p.gold -= item.price;
+  if (id === 'heal') { const c = colorForType('healing'); p.potions[c] = (p.potions[c] || 0) + 1; potionKnown.add(c); }
+  else if (id === 'strength') { const c = colorForType('strength'); p.potions[c] = (p.potions[c] || 0) + 1; potionKnown.add(c); }
+  else if (id === 'speed') { const c = colorForType('speed'); p.potions[c] = (p.potions[c] || 0) + 1; potionKnown.add(c); }
+  else if (id === 'food') p.rations++;
+  else if (id === 'map') p.scrollMap++;
+  else if (id === 'tele') p.scrollTele++;
+  else if (id === 'weapon') { p.weaponBonus = clamp(p.weaponBonus + 1, 1, WEAPONS.length - 1); p.weaponName = WEAPONS[p.weaponBonus]; }
+  else if (id === 'armor') { p.armorBonus = clamp(p.armorBonus + 1, 1, ARMORS.length - 1); p.armorName = ARMORS[p.armorBonus]; }
+  sendLog(p, `You buy the ${item.name} for ${item.price} gold.`, 'good');
+  openShop(p);   // refresh prices/affordability
 }
 
 function eat(p) {
@@ -420,7 +506,8 @@ function useStairs(p, want) {
 
 function winGame(p) {
   p.won = true;
-  const score = p.gold + p.level * 100 + p.kills * 25 + 1000;
+  const score = p.gold + p.level * 100 + p.kills * 25 + p.depth * 50 + 1000;
+  recordScore(p, true);
   broadcastLog(`🏆 ${p.name} escaped the dungeon with the Amulet of Yendor! VICTORY! (score ${score})`, 'good');
   send(p.ws, { t: 'win', score });
   // recycle the amulet so the quest can continue
@@ -431,7 +518,7 @@ function winGame(p) {
 // ---------- monster AI (only on floors that have players) ----------
 function tickMonsters(level) {
   for (const m of level.monsters) {
-    if (m.hp <= 0) continue;
+    if (m.hp <= 0 || m.shop) continue;
     if (++m.cd < m.speed) continue;
     m.cd = 0;
     let target = null, best = Infinity;
@@ -486,12 +573,17 @@ wss.on('connection', (ws) => {
     if (!player) return;
     if (msg.t === 'move') tryMove(player, msg.dir);
     else if (msg.t === 'fire') fireBolt(player);
-    else if (msg.t === 'quaff') quaff(player);
+    else if (msg.t === 'quaff') quaff(player, msg.color);
+    else if (msg.t === 'buy') buy(player, msg.id);
     else if (msg.t === 'eat') eat(player);
     else if (msg.t === 'readmap') readMap(player);
     else if (msg.t === 'readtele') readTele(player);
     else if (msg.t === 'descend') useStairs(player, 'down');
     else if (msg.t === 'ascend') useStairs(player, 'up');
+    else if (msg.t === '_hurt' && process.env.MR_TEST) {   // test-only: self-damage (inert in production)
+      player.hp -= (msg.n || 999);
+      if (player.hp <= 0) downPlayer(player, 'the testing void');
+    }
     else if (msg.t === 'chat') {
       const text = String(msg.text || '').slice(0, 120);
       if (text) broadcast({ t: 'chat', name: player.name, color: player.color, text });
@@ -535,17 +627,21 @@ function snapshotFor(p) {
     depth: o.depth, alive: o.alive, downed: o.downed, amulet: o.hasAmulet, me: o.id === p.id,
   }));
 
+  const potions = Object.keys(p.potions).filter(c => p.potions[c] > 0).sort()
+    .map(c => ({ color: c, count: p.potions[c], known: potionKnown.has(c), type: potionKnown.has(c) ? potionType[c] : null }));
+
   return {
     t: 'state', depth: p.depth, w: W, h: H, grid, mask,
-    monsters: visM, items: visI, others, roster,
+    monsters: visM, items: visI, others, roster, leaderboard,
     me: {
       hp: Math.max(0, p.hp), maxhp: p.maxhp, atk: p.atk, weaponBonus: p.weaponBonus, weaponName: p.weaponName,
       armorBonus: p.armorBonus, armorName: p.armorName, level: p.level, xp: p.xp, next: p.next,
-      gold: p.gold, potions: p.potions, rations: p.rations, scrollMap: p.scrollMap, scrollTele: p.scrollTele,
+      gold: p.gold, potions, potionCount: potionCount(p), rations: p.rations, scrollMap: p.scrollMap, scrollTele: p.scrollTele,
       hunger: p.hunger, hungerMax: HUNGER_MAX, hungerState: hungerState(p.hunger),
       depth: p.depth, kills: p.kills, deaths: p.deaths, className: p.className,
       alive: p.alive, hasAmulet: p.hasAmulet, poisoned: p.poison > 0,
-      ranged: p.ranged, fireReady: p.ranged && tick >= p.fireCd,
+      hasted: p.haste > tick, hasteLeft: p.haste > tick ? Math.ceil((p.haste - tick) * TICK_MS / 1000) : 0,
+      ranged: p.ranged, fireReady: p.ranged && tick >= p.fireCd, atMerchant: p.alive && nearMerchant(p),
       downed: p.downed, downedLeft: p.downed ? Math.max(0, Math.ceil((p.downedUntil - tick) * TICK_MS / 1000)) : 0,
       onStairs: p.alive ? (lvl.grid[p.y][p.x] === DOWN ? 'down' : lvl.grid[p.y][p.x] === UP ? 'up' : null) : null,
     },
@@ -563,6 +659,7 @@ setInterval(() => {
   // status effects, hunger, and downed-timer
   for (const p of players.values()) {
     if (p.alive) {
+      p.moves = p.haste > tick ? 2 : 1;   // haste grants an extra step each tick
       if (p.poison > 0 && tick % 3 === 0) {
         p.hp -= 2; p.poison--;
         if (p.hp <= 0) { downPlayer(p, 'poison'); continue; }

@@ -21,10 +21,13 @@ Open the URL in a browser (multiple tabs, or other machines on your network via
 | `Y U B N` | move diagonally |
 | `F` | fire ranged attack at the nearest visible foe (Mage/Ranger) |
 | `>` / `<` | descend / climb stairs (while standing on them) |
-| `Q` | quaff a healing potion |
+| `Q` | quaff your first potion |
+| `1`–`9` | quaff a specific potion from your belt (or click it) |
 | `E` | eat a food ration |
 | `R` / `T` | read scroll of magic mapping / teleportation |
 | `Enter` | chat with the party |
+
+On phones/tablets an on-screen **D-pad and action buttons** appear automatically.
 
 ### Classes
 
@@ -50,8 +53,16 @@ stays cleared and the party can split across depths.
   incoming damage. Better gear auto-equips.
 - **Ranged combat:** Mages and Rangers press `F` to strike the nearest foe in sight — a
   bolt streaks across the map. Warriors fight up close.
+- **Potions** (`!`) come in random colours each run — drink one to learn what it does
+  (and the whole party learns too). Types: *healing*, *strength* (+ATK), *speed* (haste —
+  move twice as fast for a while), and the occasional *harmful* brew. Manage your belt with
+  the number keys.
 - **Scrolls** (`?`): *magic mapping* (`R`) reveals the whole floor; *teleportation* (`T`)
   blinks you to a random spot.
+- **Merchant** (`P`): a travelling shopkeeper sets up every 3rd floor. Bump into them to
+  trade gold for potions, food, scrolls, and weapon/armor upgrades — so gold finally matters.
+- **Hall of Fame:** winning or dying records your score (gold + level + kills + depth, with
+  a big bonus for escaping with the Amulet). Top runs persist across sessions.
 - **Loot & combat:** grab `$` gold and `!` potions; kill monsters
   (`b`at → `r`at → `k`obold → `s`nake → `o`rc → `z`ombie → `T`roll → `D`ragon, scaling with
   depth) for XP and level up (+HP/+ATK). Slain monsters may drop gold. **Snakes poison** you.
@@ -90,8 +101,10 @@ For a quick public link from your own machine, a tunnel works too:
   lives here, so clients can't cheat or see through walls.
 - `test-client.mjs` — headless smoke test (fog-of-war, HUD, classes, ranged, movement).
 - `test-descend.mjs` — pathfinding bot that explores, descends, and climbs back.
-- `test-coop.mjs` — two bots descend to a lethal floor; verifies ranged combat and the
-  downed → revive co-op loop.
+- `test-coop.mjs` — verifies ranged combat and the downed → revive co-op loop. Run the
+  server with `MR_TEST=1` first (it enables an inert-in-production self-damage test hook).
+- `test-shop.mjs` — a bot descends to the merchant floor, opens the shop, and quaffs a
+  typed potion.
 
 Authoritative-server design means all players always agree on the world state, and
 since visibility is computed server-side, the unexplored map is never sent to a client.

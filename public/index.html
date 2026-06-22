@@ -49,6 +49,29 @@
   #banner { position:fixed; top:0; left:0; right:0; text-align:center; padding:14px;
     background:linear-gradient(90deg,#1a1206,#3a2a08,#1a1206); color:var(--gold); font-size:20px;
     font-weight:bold; display:none; z-index:20; border-bottom:1px solid var(--gold); }
+  #potList .pot { cursor:pointer; display:inline-block; margin:2px 6px 2px 0; padding:1px 6px;
+    border:1px solid #2c3447; border-radius:5px; }
+  #potList .pot:hover { border-color:var(--gold); }
+  /* shop */
+  #shop { position:fixed; inset:0; background:rgba(5,7,12,.9); display:none; z-index:30;
+    align-items:center; justify-content:center; }
+  #shopBox { background:var(--panel); border:1px solid var(--gold); border-radius:10px;
+    padding:18px 22px; min-width:330px; max-width:90vw; }
+  .shopItem { display:flex; justify-content:space-between; align-items:center; gap:14px; padding:5px 0; }
+  .shopItem button { font-family:inherit; cursor:pointer; background:var(--gold); color:#000; border:0;
+    border-radius:5px; padding:4px 12px; font-weight:bold; }
+  .shopItem button:disabled { background:#333a; color:#777; cursor:not-allowed; }
+  #shopClose, #touch button { font-family:inherit; cursor:pointer; background:#05070c; color:var(--ink);
+    border:1px solid #2c3447; border-radius:6px; padding:6px 14px; }
+  /* touch controls — hidden on desktop, shown on coarse pointers / narrow screens */
+  #touch { display:none; position:fixed; bottom:8px; left:8px; right:8px; z-index:15;
+    justify-content:space-between; align-items:flex-end; pointer-events:none; }
+  #touch > * { pointer-events:auto; }
+  #dpad { display:grid; grid-template-columns:repeat(3,46px); grid-auto-rows:46px; gap:4px; opacity:.85; }
+  #dpad button { font-size:18px; padding:0; }
+  #acts { display:grid; grid-template-columns:1fr 1fr; gap:4px; opacity:.9; }
+  #acts button { font-size:13px; padding:8px 6px; }
+  @media (pointer:coarse), (max-width:760px) { #touch { display:flex; } }
 </style>
 </head>
 <body>
@@ -74,6 +97,31 @@
 
 <div id="banner"></div>
 
+<div id="shop">
+  <div id="shopBox">
+    <h2 style="color:var(--gold);margin-top:0;">⚖ The Merchant</h2>
+    <div class="sys" style="margin-bottom:8px;">Your gold: <b id="shopGold" style="color:var(--gold)">0</b></div>
+    <div id="shopItems"></div>
+    <button id="shopClose" style="margin-top:10px;">Close (Esc)</button>
+  </div>
+</div>
+
+<div id="touch">
+  <div id="dpad">
+    <button data-dir="upleft">↖</button><button data-dir="up">↑</button><button data-dir="upright">↗</button>
+    <button data-dir="left">←</button><button data-act="wait">·</button><button data-dir="right">→</button>
+    <button data-dir="downleft">↙</button><button data-dir="down">↓</button><button data-dir="downright">↘</button>
+  </div>
+  <div id="acts">
+    <button data-msg="fire">🔥 Fire</button>
+    <button data-act="quaff">⚗ Quaff</button>
+    <button data-msg="eat">🍖 Eat</button>
+    <button data-msg="readmap">📜 Map</button>
+    <button data-msg="descend">▼ Down</button>
+    <button data-msg="ascend">▲ Up</button>
+  </div>
+</div>
+
 <div id="wrap">
   <div id="left">
     <div id="map" class="panel"></div>
@@ -85,7 +133,8 @@
       <span style="color:#9fd0ff">[</span> armor &nbsp; <span style="color:#caa15a">?</span> scroll &nbsp;
       <span style="color:#ff8c42">^</span> trap &nbsp; <span style="color:#fff">&gt;&lt;</span> stairs &nbsp;
       <span style="color:var(--gold)">"</span> Amulet &nbsp; <span style="color:#7a2a2a">%</span> fallen ally &nbsp;
-      <span style="color:#ff5d5d">b r k s o z T D</span> monsters &nbsp; <span style="color:#b07cff">W</span> boss
+      <span style="color:#ff5d5d">b r k s o z T D</span> monsters &nbsp; <span style="color:#b07cff">W</span> boss &nbsp;
+      <span style="color:#ffd24e">P</span> merchant
     </div>
   </div>
   <div id="right">
@@ -110,12 +159,17 @@
       <div class="row sys" style="font-size:12px;">
         <span id="weap"></span><span id="armr"></span>
       </div>
+      <div id="potList" style="font-size:12px;margin-top:4px;"></div>
       <div id="status"></div>
       <div id="stairHint" class="sys" style="font-size:12px;margin-top:4px;"></div>
     </div>
     <div class="panel" style="flex:0 0 auto;">
       <h2>Party</h2>
       <div id="roster"></div>
+    </div>
+    <div class="panel" style="flex:0 0 auto;">
+      <h2>🏆 Hall of Fame</h2>
+      <div id="fame" class="sys" style="font-size:12px;"></div>
     </div>
     <div class="panel" style="display:flex;flex-direction:column;flex:1 1 auto;min-height:0;">
       <h2>Log &amp; Chat</h2>
@@ -127,7 +181,8 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let ws, myId = null, W = 0, H = 0, lastState = null, chosenClass = 'warrior';
+let ws, myId = null, W = 0, H = 0, lastState = null, chosenClass = 'warrior', myPotions = [];
+const quaffIndex = (i) => { if (myPotions[i]) sendMsg({ t: 'quaff', color: myPotions[i].color }); };
 
 function connect(name) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -147,8 +202,28 @@ function handle(m) {
     fxList.push({ cells: line(m.from, m.to), col: m.color, until: Date.now() + 180 });
     if (lastState) { render(lastState); setTimeout(() => lastState && render(lastState), 190); }
   }
+  else if (m.t === 'shop') openShopUI(m);
   else if (m.t === 'win') showBanner(`🏆 VICTORY! You escaped with the Amulet. Score ${m.score}.`);
 }
+
+// ---------- shop ----------
+let shopOpen = false;
+function openShopUI(m) {
+  shopOpen = true;
+  $('shop').style.display = 'flex';
+  $('shopGold').textContent = m.gold;
+  const box = $('shopItems'); box.innerHTML = '';
+  for (const it of m.items) {
+    const row = document.createElement('div'); row.className = 'shopItem';
+    const afford = m.gold >= it.price;
+    row.innerHTML = `<span>${esc(it.name)}</span>`;
+    const b = document.createElement('button');
+    b.textContent = `${it.price} 🪙`; b.disabled = !afford;
+    b.onclick = () => sendMsg({ t: 'buy', id: it.id });
+    row.appendChild(b); box.appendChild(row);
+  }
+}
+function closeShop() { shopOpen = false; $('shop').style.display = 'none'; }
 
 // Bresenham line for drawing the bolt path
 function line(a, b) {
@@ -183,7 +258,7 @@ function addLog(text, cls, color) {
 }
 
 const TERRAIN_COLOR = { '#':'#3b4456', '.':'#2a3344', '>':'#ffffff', '<':'#ffffff', '^':'#ff8c42', ' ':'#000' };
-const MON_COLOR = { b:'#9aa', r:'#b98', k:'#caa15a', s:'#6ab04c', o:'#6ab04c', z:'#8a8', T:'#3aa0c0', D:'#ff5d5d', W:'#b07cff' };
+const MON_COLOR = { b:'#9aa', r:'#b98', k:'#caa15a', s:'#6ab04c', o:'#6ab04c', z:'#8a8', T:'#3aa0c0', D:'#ff5d5d', W:'#b07cff', P:'#ffd24e' };
 const ITEM_COLOR = { '$':'#ffd24e', '!':'#7CFC00', '%':'#caa15a', ')':'#9fd0ff', '[':'#9fd0ff', '"':'#ff6ec7' };
 
 function render(s) {
@@ -245,20 +320,35 @@ function render(s) {
   $('atk').textContent = me.atk + me.weaponBonus;
   $('ac').textContent = me.armorBonus;
   $('gold').textContent = me.gold;
-  $('pot').textContent = me.potions;
+  $('pot').textContent = me.potionCount;
   $('rat').textContent = me.rations;
   $('scr').textContent = me.scrollMap + me.scrollTele;
   $('weap').textContent = `⚔ ${me.weaponName}${me.weaponBonus?` (+${me.weaponBonus})`:''}`;
   $('armr').textContent = `🛡 ${me.armorName}${me.armorBonus?` (+${me.armorBonus})`:''}`;
+  // potion inventory (clickable + number hotkeys)
+  myPotions = me.potions;
+  const pl = $('potList');
+  pl.innerHTML = me.potions.length
+    ? me.potions.map((p, i) => `<span class="pot" data-i="${i}" title="quaff (${i+1})">${i+1}: ${p.color}${p.known?` <i class="sys">(${p.type})</i>`:''} ×${p.count}</span>`).join('')
+    : '<span class="sys">no potions</span>';
+  pl.querySelectorAll('.pot').forEach(el => el.onclick = () => quaffIndex(+el.dataset.i));
   const st = [];
+  if (me.hasted) st.push(`<span style="color:#ffd24e">⚡ Hasted ${me.hasteLeft}s</span>`);
   if (me.poisoned) st.push('<span style="color:#7CFC00">☣ Poisoned</span>');
   if (me.ranged) st.push(me.fireReady ? '<span style="color:#9fd0ff">➶ Fire ready (F)</span>' : '<span class="sys">➶ Fire charging…</span>');
   if (me.scrollMap) st.push(`<span class="sys">📜 map ×${me.scrollMap} (R)</span>`);
   if (me.scrollTele) st.push(`<span class="sys">📜 tele ×${me.scrollTele} (T)</span>`);
   $('status').innerHTML = st.join(' &nbsp; ');
-  $('stairHint').textContent = me.onStairs === 'down' ? 'Down-stairs here — press > to descend.'
+  $('stairHint').textContent = me.atMerchant ? 'A merchant is here — bump into them to trade.'
+    : me.onStairs === 'down' ? 'Down-stairs here — press > to descend.'
     : me.onStairs === 'up' ? (me.depth === 1 ? 'The dungeon exit — press < to leave (need the Amulet).' : 'Up-stairs here — press < to climb.')
     : '';
+
+  // Hall of Fame
+  const fame = $('fame');
+  fame.innerHTML = (s.leaderboard && s.leaderboard.length)
+    ? s.leaderboard.slice(0, 6).map((e, i) => `<div>${i+1}. ${esc(e.name)} <span class="sys">${e.cls?.slice(0,3)||''} ${e.won?'👑':''} D${e.depth} · ${e.score}pts</span></div>`).join('')
+    : '<span class="sys">no legends yet — be the first</span>';
 
   // roster
   const ros = $('roster'); ros.innerHTML = '';
@@ -290,7 +380,9 @@ document.addEventListener('keydown', (e) => {
     else if (e.key === 'Escape') { $('cmd').value=''; $('cmd').blur(); }
     return;
   }
+  if (e.key === 'Escape' && shopOpen) { closeShop(); return; }
   if (e.key === 'Enter') { $('cmd').focus(); e.preventDefault(); return; }
+  if (e.key >= '1' && e.key <= '9') { quaffIndex(+e.key - 1); return; }
   if (e.key === 'q' || e.key === 'Q') { sendMsg({ t:'quaff' }); return; }
   if (e.key === 'e' || e.key === 'E') { sendMsg({ t:'eat' }); return; }
   if (e.key === 'f' || e.key === 'F') { sendMsg({ t:'fire' }); return; }
@@ -324,6 +416,22 @@ document.querySelector('.cls[data-cls="warrior"]').classList.add('sel');
 $('playBtn').onclick = start;
 $('nameIn').addEventListener('keydown', e => { if (e.key === 'Enter') start(); });
 $('nameIn').focus();
+
+// shop close
+$('shopClose').onclick = closeShop;
+$('shop').addEventListener('click', e => { if (e.target === $('shop')) closeShop(); });
+
+// touch controls
+document.querySelectorAll('#touch button').forEach(btn => {
+  const fire = (e) => {
+    e.preventDefault();
+    if (btn.dataset.dir) sendMove(btn.dataset.dir);
+    else if (btn.dataset.msg) sendMsg({ t: btn.dataset.msg });
+    else if (btn.dataset.act === 'quaff') quaffIndex(0);
+  };
+  btn.addEventListener('touchstart', fire, { passive: false });
+  btn.addEventListener('click', fire);
+});
 </script>
 </body>
 </html>
